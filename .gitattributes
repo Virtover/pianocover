@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.pt binary
+*.wav binary
+*.mid binary

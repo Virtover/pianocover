@@ -1,0 +1,13 @@
+# Teacher pipeline (pianocover/teacher). Licenses + check dates: docs/MODEL_LICENSES.md
+# basic-pitch and beat_this are installed with --no-deps in the Dockerfile (basic-pitch
+# would otherwise pull TensorFlow on Linux; we run its bundled ONNX model).
+demucs==4.1.0                 # MIT; htdemucs (4-stem) only
+onnxruntime-gpu==1.22.0       # last tested CUDA-12 build (1.31 needs CUDA 13 and silently falls back to CPU)
+resampy<0.4.3                 # basic-pitch dependency
+scikit-learn                  # basic-pitch dependency
+einops                        # beat_this
+rotary-embedding-torch        # beat_this
+soxr
+soundfile
+pandas                        # curate_fma
+pyyaml                        # BTC config

@@ -16,7 +16,8 @@ work-for-hire, ace-step. Anything with NC or ND is always refused; ShareAlike (S
 refused unless --allow-sharealike. Unrecognised strings are refused, so every training
 pair has a recorded, commercially usable license.
 
-Output (in --out): train.pkl, val.pkl, style_stats.json, import_report.csv, audio/<id>.wav
+Output (in --out): train.pkl, val.pkl, style_stats.json, import_report.csv,
+audio/<sha1 of source path>.wav (one per distinct source audio file)
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import os
 import pickle
 import re
 import subprocess
@@ -101,7 +103,7 @@ def to_wav(src: Path, dst: Path) -> None:
     if dst.exists() and dst.stat().st_size > 1000:
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    part = dst.with_suffix(".part.wav")
+    part = dst.with_suffix(f".part{os.getpid()}.wav")  # several rows may share one source file
     r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src), "-ac", "1",
                         "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(part)], capture_output=True, text=True)
     if r.returncode != 0:
@@ -116,8 +118,12 @@ def process_row(job):
     try:
         from .audio import wav_info
 
-        wav = out / "audio" / f"{item_id}.wav"
-        to_wav(base / row["audio"], wav)
+        # one WAV per *source file*: rows sharing audio (e.g. several difficulty levels of one
+        # teacher song) must not store it several times
+        src = (base / row["audio"]).resolve()
+        wav_name = f"{hashlib.sha1(str(src).encode()).hexdigest()[:16]}.wav"
+        wav = out / "audio" / wav_name
+        to_wav(src, wav)
         _, duration = wav_info(wav)
         ev = midi_to_events(base / row["midi"], float(row.get("offset") or 0.0))
         ev = ev[(ev[:, events.END] > 0) & (ev[:, events.START] < duration)]
@@ -129,7 +135,7 @@ def process_row(job):
         return {
             **info, "status": "ok",
             "pop_id": row.get("song_id") or item_id, "piano_id": item_id,
-            "audio": str(Path("audio") / f"{item_id}.wav"), "duration": float(duration),
+            "audio": str(Path("audio") / wav_name), "duration": float(duration),
             "events": ev.astype(np.float32), "bad_regions": [], "raw_style": style_mod.raw_style(ev),
             "n_notes": n_notes, "quality": 1.0,
         }

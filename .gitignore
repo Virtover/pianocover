@@ -5,3 +5,4 @@ runs/
 data/
 *.pt
 *.wav
+.venv/

@@ -40,14 +40,83 @@ needs an NVIDIA driver of version 570 or newer.
 
 ```bash
 docker build -t pianocover .
-docker run --gpus all -it -v /data:/data pianocover
+docker run --gpus all -it --shm-size=8g -v /data:/data pianocover
 python scripts/check_env.py      # run this first: GPU support, one training step, one generation
 ```
 
+`--shm-size=8g` (or `--ipc=host`) is required for training with `--workers > 0`: Docker's
+default 64 MB `/dev/shm` makes DataLoader workers crash.
+
 `check_env.py` loads pretrained Transkun into the model and runs one bf16 training step
 through the semi-CRF and the style layers. It checks the style layers actually get
-gradients, generates 30 s of audio, and prints time and peak VRAM. If it says
-`ALL CHECKS PASSED`, the stack works on your card.
+gradients, and that gradient checkpointing recomputes the same forward pass as the original
+(FiLM included), comparing gradients with checkpointing on and off. It then generates 30 s
+of audio and prints time and peak VRAM. If it says `ALL CHECKS PASSED`, the stack works on
+your card.
+
+**Measured (RTX 3060 Ti 8 GB, sm_86, 2026-11-09):**
+- train step, batch 2 × 16 s: 2.9 GiB peak;
+- generation, 30 s of audio: 0.83 GiB peak;
+- checkpointed vs plain FiLM gradients: relative difference 1e-7.
+
+sm_120 (RTX 5070) has not been run yet.
+
+## Stopping and resuming training
+
+Stop training whenever you like and run **the same command** again to continue. It resumes
+from `<out>/last.pt` at the exact step and data position (the same chunks, in the same
+order), with the same optimizer, scheduler and RNG state.
+
+- **Ctrl+C, `docker stop -t 60 <container>`, or an OS shutdown (SIGTERM):** training finishes
+  the current step, saves, and exits with code 130. A stop during validation skips the rest
+  of that validation. Press Ctrl+C twice to abort without saving.
+- **Crash or power loss:** `last.pt` is also written every `--save-every-min` minutes
+  (default 10), so at most that much training is lost. Writes are atomic (temp file, fsync,
+  rename). The previous copy is kept as `last.prev.pt` and is used automatically if
+  `last.pt` is unreadable.
+- **`log.csv`:** rows written after the resumed checkpoint are dropped, so they're not
+  duplicated.
+
+`scripts/test_resume.sh <dataset>` checks all of this end to end. It interrupts a run with
+SIGINT, resumes it, and compares the consumed chunks with an uninterrupted run. **Verified:**
+`RESUME EXACT: PASS`. Also verified: SIGINT and SIGTERM sent to the whole process group,
+and a truncated `last.pt` falling back to `last.prev.pt`.
+
+## Teacher pipeline (license-clear "teacher" data)
+
+`pianocover/teacher/` arranges CC BY / CC0 songs into piano covers offline by **reduction**:
+every output note was heard in the song, moved by octaves at most. Chords are used only to
+filter and correct notes.
+- **RH melody:** the vocal line. Where there are no vocals, guitar riffs and solos (or
+  synth hooks) take its place.
+- **LH:** the real bass line.
+- **Middle voices:** placed on real strum, keys and drum onsets, and voiced from the
+  transcribed guitar/keys notes.
+- **Density:** follows each section's energy.
+- **Difficulty:** five levels (`easy` … `virtuoso`).
+
+Models: Demucs htdemucs (4 stems), basic-pitch (ONNX on GPU), Transkun, beat_this and BTC.
+Licenses and check dates are in `docs/MODEL_LICENSES.md`.
+
+```bash
+# 1. pick and fetch commercially usable FMA tracks (license gate = import_aligned's)
+python -m pianocover.teacher.curate_fma --meta /data/fma/fma_metadata --out /data/fma_cc --limit 10 --download
+# 2. analyse + arrange (models stay loaded; analyses are cached as .npz)
+python -m pianocover.teacher.pipeline /data/fma_cc/songs.csv --out /data/teacher --levels simple,normal,full
+#    re-tune arrange.py, then re-arrange from the cache without the GPU:
+python -m pianocover.teacher.pipeline /data/fma_cc/songs.csv --out /data/teacher --rearrange
+# 3. import (one WAV per song, however many levels)
+python -m pianocover.import_aligned /data/teacher/manifest.csv --out /data/ds_teacher
+# benchmark: resident VRAM, per-step latency and peak VRAM
+python -m pianocover.teacher.bench /data/fma_cc/audio/*.mp3 --json bench.json
+```
+
+- **FMA:** `fma_full.zip` (879 GiB) is never downloaded whole. Curation reads only the
+  selected MP3s with HTTP range requests.
+- **Jamendo:** not used. Its API terms allow free use for non-commercial purposes only;
+  commercial use needs a quote from licensing@jamendo.com.
+- **MTG-Jamendo:** not used. It has no per-track license field, and secondary sources
+  report it as non-commercial.
 
 ## License-clear training
 
@@ -159,8 +228,9 @@ Each epoch also prints the share of chunks sampled from each source.
   driver is older than 570. `check_env.py` reports which.
 - **Covers come out too dense or too sparse.** Check `val_density_ratio`, then steer with
   `--style` / `--set log_onset_rate=...`.
-- **Unit tests.** Run `python tests/test_core.py`. These cover the code that doesn't need
-  PyTorch.
+- **Unit tests.** Run `python tests/test_core.py` and `python tests/test_teacher.py`. These
+  cover the code that doesn't need PyTorch, including the arranger's reduction guarantees.
+  `scripts/test_resume.sh` covers interrupt/resume, and needs a GPU and a dataset.
 
 ## Licensing
 

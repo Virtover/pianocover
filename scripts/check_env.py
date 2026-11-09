@@ -55,13 +55,39 @@ def main():
     loss.backward()
     torch.cuda.synchronize()
     film_grad = sum(float(p.grad.abs().sum()) for p in model.film.parameters() if p.grad is not None)
-    print(f"train step: loss {float(loss):.2f}, {time.time() - t0:.2f}s, "
+    print(f"train step: loss {loss.item():.2f}, {time.time() - t0:.2f}s, "
           f"peak VRAM {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB (batch 2 x 16 s)")
     if not np.isfinite(float(loss)):
         sys.exit("non-finite loss: try --no-amp in training")
     if film_grad == 0:
         sys.exit("FiLM layers received no gradient: style conditioning would not train")
     print("FiLM gradients OK")
+
+    # Gradient checkpointing must recompute the SAME forward (FiLM included). Compare grads
+    # with checkpointing on/off, in eval mode (no dropout) and with non-zero FiLM weights.
+    model.zero_grad(set_to_none=True)
+    model.eval()
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    with torch.no_grad():
+        for lin in model.film:
+            lin.weight.copy_(torch.randn(lin.weight.shape, generator=gen) * 0.05)
+    bb = model.transkun.backbone
+    model.use_amp = False  # fp32 so both paths are numerically comparable
+    grads = []
+    for use_ckpt in (True, False):
+        bb.useGradientCheckpoint = use_ckpt
+        model.zero_grad(set_to_none=True)
+        (-model.log_prob(audio[:1, : 8 * SAMPLE_RATE], notes[:1], st[:1]).sum()).backward()
+        grads.append(torch.cat([p.grad.flatten().float() for p in model.film.parameters()]))
+    bb.useGradientCheckpoint = False
+    model.use_amp = True
+    rel = float((grads[0] - grads[1]).norm() / grads[1].norm().clamp_min(1e-12))
+    print(f"checkpointed vs plain FiLM gradient: relative difference {rel:.2e}")
+    if rel > 1e-3:
+        sys.exit("gradient checkpointing recomputes a different forward: style handling is broken")
+    with torch.no_grad():
+        for lin in model.film:
+            lin.weight.zero_()
 
     # generation on 30 s of audio
     model.eval()

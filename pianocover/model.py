@@ -6,9 +6,15 @@ encoder block, the hidden state h (shape [N, T, F, D]) becomes h * (1 + gamma) +
 with gamma/beta predicted from the style vector. FiLM layers are zero-initialised, so at
 step 0 the model is exactly pretrained Transkun (the AMT-APC "fine-tune a transcriber" idea).
 
-The FiLM is applied through forward hooks, so Transkun's own code is not modified; the
-hooks recompute gamma/beta from leaf parameters on every call, which keeps them correct
-under Transkun's gradient checkpointing.
+The FiLM is applied through forward hooks, so Transkun's own code is not modified.
+
+Gradient checkpointing: in training mode Transkun wraps every encoder layer in (reentrant)
+torch.utils.checkpoint, which re-runs the layer -- and therefore our hook -- during
+backward(). The hook reads the current style, so the style set by log_prob() must still be
+in place when backward() runs. log_prob() therefore leaves it set (it is replaced by the
+next log_prob() call); always call backward() on one log_prob() result before the next
+log_prob() with a different style. generate() restores the previous style when it is done.
+scripts/check_env.py verifies checkpointed and non-checkpointed gradients agree.
 """
 
 from __future__ import annotations
@@ -111,21 +117,20 @@ class PianoCoverModel(nn.Module):
     # ----------------------------------------------------------------- API
     def log_prob(self, audio: torch.Tensor, notes_batch, style: torch.Tensor | None):
         """audio: [B, nSample, nChannel] at 44.1 kHz; notes_batch: list of lists of transkun Notes."""
+        # No reset afterwards: checkpoint recomputation during backward() needs this style.
         self.set_style(style)
-        try:
-            return self.transkun.log_prob(audio, notes_batch)
-        finally:
-            self.set_style(None)
+        return self.transkun.log_prob(audio, notes_batch)
 
     @torch.no_grad()
     def generate(self, audio: torch.Tensor, style: torch.Tensor | None, step_sec=None, segment_sec=None):
         """audio: [nSample, nChannel] tensor at 44.1 kHz -> list of transkun Notes (absolute times)."""
+        previous = self._style
         self.set_style(style)
         try:
             return self.transkun.transcribe(audio, stepInSecond=step_sec, segmentSizeInSecond=segment_sec,
                                             discardSecondHalf=False)
         finally:
-            self.set_style(None)
+            self._style = previous
 
     def parameter_groups(self, lr_backbone: float, lr_heads: float, lr_film: float, weight_decay: float):
         """Lower LR for the pretrained backbone, higher for heads, highest for the new FiLM layers."""

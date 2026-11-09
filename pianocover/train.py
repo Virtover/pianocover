@@ -1,7 +1,15 @@
 """Fine-tune Transkun V2 into a style-conditioned piano cover model.
 
 Single-GPU training. The defaults (batch 2 x accumulation 2) fit a 12 GB card such as the
-RTX 5070; on 24 GB use --batch-size 4 --accum 1. Resumes automatically from <out>/last.pt.
+RTX 5070; on 24 GB use --batch-size 4 --accum 1.
+
+Stopping and resuming: just run the same command again; training continues from
+<out>/last.pt at the exact step, data position (same chunk order) and RNG state.
+  * Ctrl+C / SIGTERM (e.g. `docker stop -t 60 <container>`): finishes the current step,
+    saves last.pt and exits (exit code 130). Press Ctrl+C twice to abort without saving.
+  * crash / power loss: last.pt is also written every --save-every-min minutes (default 10),
+    atomically (temp file + fsync + rename, previous copy kept as last.prev.pt), so at most
+    ~10 minutes of training are lost and a half-written file is never loaded.
 
 Two-stage recipe for the license-clear plan, both stages on ONE merged dataset (so the
 style statistics are shared):
@@ -21,7 +29,9 @@ import collections
 import csv
 import json
 import math
+import os
 import random
+import signal
 import time
 from pathlib import Path
 
@@ -48,6 +58,94 @@ class AdaptiveClip:
         if torch.isfinite(norm):
             self.hist.append(float(norm))
         return float(norm), limit
+
+
+class StopRequest:
+    """Ctrl+C / SIGTERM -> finish the current step, save, exit. A second Ctrl+C aborts."""
+
+    def __init__(self):
+        self.requested = False
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, self._handle)
+
+    def _handle(self, signum, _frame):
+        if self.requested and signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        self.requested = True
+        print(f"\n[stop] signal {signum}: saving after the current step "
+              "(Ctrl+C again to abort without saving)", flush=True)
+
+
+class ResumableSampler(torch.utils.data.Sampler):
+    """Deterministic per-epoch order (seeded), startable at an offset, so a resumed run
+    continues with exactly the chunks it had not seen yet in that epoch."""
+
+    def __init__(self, n, weights, seed, start=0):
+        g = torch.Generator().manual_seed(seed)
+        if weights is None:
+            self.order = torch.randperm(n, generator=g).tolist()
+        else:
+            w = torch.as_tensor(weights, dtype=torch.double)
+            self.order = torch.multinomial(w, n, replacement=True, generator=g).tolist()
+        self.start = min(start, n)
+
+    def __iter__(self):
+        return iter(self.order[self.start:])
+
+    def __len__(self):
+        return len(self.order) - self.start
+
+
+def ignore_stop_signals(_worker_id=None):
+    """DataLoader workers ignore Ctrl+C / SIGTERM: a terminal (Ctrl+C) or an OS shutdown
+    (SIGTERM) signals the whole process group, and a worker dying first would crash the main
+    process (torch raises on worker death) before it can save. Only the main process stops;
+    it then shuts the workers down normally."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def rng_state() -> dict:
+    st = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        st["cuda"] = torch.cuda.get_rng_state_all()
+    return st
+
+
+def set_rng_state(st: dict) -> None:
+    random.setstate(st["python"])
+    np.random.set_state(st["numpy"])
+    torch.set_rng_state(st["torch"])
+    if "cuda" in st and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(st["cuda"])
+
+
+def load_resume(out: Path, use_amp: bool):
+    """Load last.pt, falling back to last.prev.pt if last.pt is missing or unreadable."""
+    for name in ("last.pt", "last.prev.pt"):
+        path = out / name
+        if not path.exists():
+            continue
+        try:
+            model, ckpt = PianoCoverModel.from_checkpoint(path, use_amp=use_amp)
+            return model, ckpt, path
+        except Exception as exc:  # truncated / corrupt file (e.g. power loss without fsync)
+            print(f"[resume] could not load {path}: {type(exc).__name__}: {exc}", flush=True)
+    return None, None, None
+
+
+def truncate_log(log_path: Path, step: int) -> None:
+    """Drop log rows written after the checkpoint we resume from (they will be redone)."""
+    if not log_path.exists():
+        return
+    with log_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return
+    keep = [rows[0]] + [r for r in rows[1:] if r and r[0].isdigit() and int(r[0]) <= step]
+    if len(keep) != len(rows):
+        with log_path.open("w", newline="") as f:
+            csv.writer(f).writerows(keep)
 
 
 def lr_lambda(step, warmup, total, floor=0.1):
@@ -81,12 +179,16 @@ def onset_f1(est: np.ndarray, ref: np.ndarray, tol=0.05):
 
 
 @torch.no_grad()
-def validate(model, loader, device, n_decode, chunk_sec):
+def validate(model, loader, device, n_decode, chunk_sec, stop=None):
+    """Returns None if a stop was requested meanwhile (validation is then skipped)."""
     model.eval()
     nll_sum, sec_sum = 0.0, 0.0
     f1s, dens = [], []
     decoded = 0
     for batch in loader:
+        if stop is not None and stop.requested:
+            model.train()
+            return None
         audio = batch["audio"].to(device)
         style = batch["style"].to(device)
         notes = batch_to_notes(batch, [0] * audio.shape[0], chunk_sec)
@@ -109,12 +211,20 @@ def validate(model, loader, device, n_decode, chunk_sec):
             "val_density_ratio": float(np.median(dens)) if dens else float("nan")}
 
 
-def save(path, model, extra):
+def save(path, model, extra, keep_previous=False):
+    """Atomic, crash-safe save: temp file + fsync + rename. With keep_previous the old file
+    becomes <name>.prev.pt first, so a valid checkpoint exists at every instant."""
+    path = Path(path)
     payload = model.checkpoint_payload()
     payload.update(extra)
-    tmp = Path(str(path) + ".tmp")
-    torch.save(payload, tmp)
-    tmp.replace(path)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        torch.save(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
+    if keep_previous and path.exists():
+        os.replace(path, path.with_suffix(".prev.pt"))
+    os.replace(tmp, path)
 
 
 def main(argv=None):
@@ -153,6 +263,8 @@ def main(argv=None):
     ap.add_argument("--val-chunks", type=int, default=400)
     ap.add_argument("--val-decode", type=int, default=48, help="chunks decoded for onset F1")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save-every-min", type=float, default=10.0,
+                    help="also write last.pt every N minutes (limits loss on crash / power-off)")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -178,9 +290,10 @@ def main(argv=None):
     print(f"train pairs={len(train_items)} val pairs={len(val_items)}")
 
     last = out / "last.pt"
-    if last.exists():
-        model, ckpt = PianoCoverModel.from_checkpoint(last, use_amp=not args.no_amp)
-        print(f"resuming from {last} at step {ckpt['step']}")
+    model, ckpt, resumed_from = load_resume(out, use_amp=not args.no_amp)
+    if model is not None:
+        print(f"resuming from {resumed_from} at step {ckpt['step']} "
+              f"(epoch {ckpt.get('epoch', 0)}, batch {ckpt.get('batches_in_epoch', 0)})")
     elif args.init and "style_dim" in torch.load(args.init, map_location="cpu", weights_only=False):
         model, ckpt = PianoCoverModel.from_checkpoint(args.init, use_amp=not args.no_amp)
         ckpt = None
@@ -191,21 +304,27 @@ def main(argv=None):
     opt = torch.optim.AdamW(model.parameter_groups(args.lr_backbone, args.lr_heads, args.lr_film,
                                                    args.weight_decay), betas=(0.9, 0.98))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_lambda(s, args.warmup, args.steps))
-    step, best = 0, float("inf")
+    step, best, epoch, batches_in_epoch = 0, float("inf"), 0, 0
     clipper = AdaptiveClip(args.clip_quantile)
     if ckpt is not None:
         opt.load_state_dict(ckpt["optimizer"])
         sched.load_state_dict(ckpt["scheduler"])
         step, best = ckpt["step"], ckpt.get("best_val", float("inf"))
-        clipper.hist.extend(ckpt.get("clip_hist", []))
+        epoch, batches_in_epoch = ckpt.get("epoch", 0), ckpt.get("batches_in_epoch", 0)
+        clipper.hist.clear()
+        clipper.hist.extend(ckpt.get("clip_hist", []) or [40.0])
+        if "rng" in ckpt:
+            set_rng_state(ckpt["rng"])
 
     augmentator = make_augmentator(args.noise_folder, args.ir_folder) if args.augment else None
     val_set = CoverChunks(val_items, args.chunk_sec, args.chunk_sec, seed=1234, dither=False)
     val_set.chunks = val_set.chunks[: args.val_chunks]
     val_loader = torch.utils.data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                                             collate_fn=collate, num_workers=min(args.workers, 2))
+                                             collate_fn=collate, num_workers=min(args.workers, 2),
+                                             worker_init_fn=ignore_stop_signals)
 
     log_path = out / "log.csv"
+    truncate_log(log_path, step)
     new_log = not log_path.exists()
     log_f = log_path.open("a", newline="")
     log = csv.writer(log_f)
@@ -213,31 +332,58 @@ def main(argv=None):
         log.writerow(["step", "loss_per_sec", "grad_norm", "clip", "lr_backbone", "sec_per_step",
                       "val_nll_per_sec", "val_onset_f1", "val_density_ratio"])
 
-    epoch = step  # only used to vary the chunk dithering seed; resuming gives a fresh order
+    stop = StopRequest()
+    style_extra = {"style_stats": style_stats, "frame_sec": FRAME_SEC}
+
+    def save_last(reason):
+        save(last, model, {**style_extra, "step": step, "best_val": best, "optimizer": opt.state_dict(),
+                           "scheduler": sched.state_dict(), "clip_hist": list(clipper.hist),
+                           "epoch": epoch, "batches_in_epoch": committed_batches, "rng": rng_state()},
+             keep_previous=True)
+        print(f"[ckpt] step {step} -> {last} ({reason})", flush=True)
+
+    committed_batches = batches_in_epoch  # data position as of the last completed optimizer step
+    trace_path = os.environ.get("PIANOCOVER_TRACE_BATCHES")
     t_last = time.time()
+    t_saved = time.time()
     running = collections.deque(maxlen=50)
-    while step < args.steps:
+    while step < args.steps and not stop.requested:
         train_set = CoverChunks(train_items, args.chunk_sec, args.hop_sec, seed=args.seed * 1000 + epoch,
                                 style_dropout=args.style_dropout, augmentator=augmentator)
         weights = chunk_weights(train_set, source_weights)
-        sampler = (torch.utils.data.WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-                   if weights is not None else None)
-        loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=sampler is None,
-                                             sampler=sampler, collate_fn=collate, num_workers=args.workers,
-                                             drop_last=True, persistent_workers=False,
+        sampler = ResumableSampler(len(train_set), weights, seed=args.seed * 7919 + epoch,
+                                   start=batches_in_epoch * args.batch_size)
+        loader_gen = torch.Generator().manual_seed(args.seed * 31 + epoch * 7 + batches_in_epoch)
+        loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, sampler=sampler,
+                                             collate_fn=collate, num_workers=args.workers,
+                                             drop_last=True, persistent_workers=False, generator=loader_gen,
+                                             worker_init_fn=ignore_stop_signals,
                                              prefetch_factor=4 if args.workers else None)
-        print(f"epoch {epoch}: {len(train_set)} chunks, sources {source_summary(train_set, source_weights)}",
-              flush=True)
+        print(f"epoch {epoch}: {len(train_set)} chunks (starting at batch {batches_in_epoch}), "
+              f"sources {source_summary(train_set, source_weights)}", flush=True)
         it = iter(loader)
-        while step < args.steps:
+        epoch_done = False
+        while step < args.steps and not stop.requested:
             opt.zero_grad(set_to_none=True)
-            loss_acc, done = 0.0, True
+            loss_acc, interrupted = 0.0, False
             for _ in range(args.accum):
                 try:
                     batch = next(it)
                 except StopIteration:
-                    done = False
+                    epoch_done = True
                     break
+                except RuntimeError:
+                    # e.g. an OS shutdown sends SIGTERM to the workers too and they die first:
+                    # if a stop is pending, drop this unfinished step and save the last full one
+                    time.sleep(1.0)
+                    if stop.requested:
+                        interrupted = True
+                        break
+                    raise
+                batches_in_epoch += 1
+                if trace_path:  # debugging aid: which chunks each step consumed
+                    with open(trace_path, "a") as tf:
+                        tf.writelines(f"{step + 1} {epoch} {k}\n" for k in batch["keys"])
                 audio = batch["audio"].to(device, non_blocking=True)
                 audio, shifts = random_key_shift(audio, args.key_shift, args.key_shift_prob)
                 notes = batch_to_notes(batch, shifts, args.chunk_sec)
@@ -247,8 +393,8 @@ def main(argv=None):
                 loss = -logp.sum() / secs
                 (loss / args.accum).backward()
                 loss_acc += float(loss) / args.accum
-            if not done:
-                break  # epoch finished; partial accumulation discarded
+            if epoch_done or interrupted:
+                break  # epoch finished / stop: partial accumulation discarded
             if not math.isfinite(loss_acc):
                 print(f"step {step}: non-finite loss, skipping batch", flush=True)
                 continue
@@ -256,6 +402,7 @@ def main(argv=None):
             opt.step()
             sched.step()
             step += 1
+            committed_batches = batches_in_epoch
             running.append(loss_acc)
 
             if step % 50 == 0:
@@ -269,19 +416,31 @@ def main(argv=None):
                 log_f.flush()
 
             if step % args.val_every == 0 or step == args.steps:
-                v = validate(model, val_loader, device, args.val_decode, args.chunk_sec)
-                print(f"[val] step {step} {v}", flush=True)
-                log.writerow([step, "", "", "", "", "", f"{v['val_nll_per_sec']:.4f}",
-                              f"{v['val_onset_f1']:.4f}", f"{v['val_density_ratio']:.3f}"])
-                log_f.flush()
-                extra = {"style_stats": style_stats, "step": step, "frame_sec": FRAME_SEC, "val": v}
-                if v["val_nll_per_sec"] < best:
-                    best = v["val_nll_per_sec"]
-                    save(out / "best.pt", model, extra)
-                    print(f"[val] new best {best:.4f} -> {out / 'best.pt'}", flush=True)
-                save(last, model, {**extra, "best_val": best, "optimizer": opt.state_dict(),
-                                   "scheduler": sched.state_dict(), "clip_hist": list(clipper.hist)})
-        epoch += 1
+                v = validate(model, val_loader, device, args.val_decode, args.chunk_sec, stop)
+                if v is not None:
+                    print(f"[val] step {step} {v}", flush=True)
+                    log.writerow([step, "", "", "", "", "", f"{v['val_nll_per_sec']:.4f}",
+                                  f"{v['val_onset_f1']:.4f}", f"{v['val_density_ratio']:.3f}"])
+                    log_f.flush()
+                    if v["val_nll_per_sec"] < best:
+                        best = v["val_nll_per_sec"]
+                        save(out / "best.pt", model, {**style_extra, "step": step, "val": v})
+                        print(f"[val] new best {best:.4f} -> {out / 'best.pt'}", flush=True)
+                save_last("validation")
+                t_saved = time.time()
+            elif time.time() - t_saved > args.save_every_min * 60:
+                save_last("periodic")
+                t_saved = time.time()
+        if epoch_done:
+            epoch += 1
+            batches_in_epoch = committed_batches = 0
+        del it, loader  # shut down workers before the next epoch / exit
+
+    if stop.requested:
+        save_last("stop requested")
+        log_f.close()
+        print(f"stopped at step {step}; run the same command again to continue", flush=True)
+        raise SystemExit(130)
     log_f.close()
     print("training finished")
 
