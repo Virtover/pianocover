@@ -1,0 +1,13 @@
+# torch / torchaudio come from the base image (see Dockerfile); install matching CUDA wheels otherwise
+transkun>=2.0.0          # MIT; ships the pretrained V2 checkpoint used as initialisation
+numpy
+scipy
+librosa>=0.10
+soundfile
+soxr
+pretty_midi
+mir_eval
+synctoolbox>=1.2         # MrMsDTW alignment (as in AMT-APC)
+yt-dlp
+tqdm
+audiomentations          # only needed with --augment

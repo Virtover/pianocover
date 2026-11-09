@@ -1,0 +1,176 @@
+# pianocover
+
+Turns a song into a piano cover (MIDI) in **one model pass**, using **Transkun V2** as the base.
+
+AMT-APC showed that a strong piano *transcriber* fine-tuned on pairs of (original song,
+piano cover) makes a good cover generator. pianocover applies that recipe to Transkun V2,
+which had the best published MAESTRO results when its paper came out (ISMIR 2024).
+It adds a **style vector** with named controls, so one model can produce anything from an
+easy to a virtuoso cover.
+
+The model is Transkun V2 plus about 30k conditioning parameters. Inference costs about the
+same as plain Transkun: an estimated 1–2 GB of VRAM, a single pass, no extra models.
+
+## How it works
+
+1. **Data**, either license-clear (recommended for a paid product) or from the web (research only):
+   - **teacher:** CC BY / CC0 songs arranged offline by a rule-based reduction pipeline;
+   - **silver:** band versions generated with ACE-Step 1.5 from piano arrangements you own;
+   - **gold:** commissioned human covers, recorded as MIDI while following the song;
+   - **web (research only):** YouTube pop/cover pairs, aligned with DTW (`pairs/` holds
+     Pop2Piano's and AMT-APC's lists).
+2. **Model:** pretrained Transkun V2. After every encoder block, FiLM layers (a learned scale
+   and shift) apply the style vector. They start at zero, so at step 0 the model is exactly
+   pretrained Transkun.
+3. **Training:** semi-CRF log-likelihood of the cover given the song audio and that cover's
+   style. It also uses random key shifts (audio and notes together), optional audio
+   augmentation, style dropout, and per-source sampling weights.
+4. **Inference:** pick a style preset, or override single features. Post-processing then
+   removes ghost notes, keeps chords playable with two hands, and can snap notes to a beat
+   grid for sheet music.
+
+Style features (each in standard deviations from the training average): `log_onset_rate`,
+`polyphony`, `velocity_mean`, `velocity_std`, `pitch_mean`, `pitch_std`, `left_hand_ratio`,
+`pedal_ratio`. Presets: `normal`, `easy`, `simple`, `full`, `virtuoso`.
+
+## Setup (RTX 5070 / any RTX 50-series)
+
+The image uses PyTorch 2.9.1 with CUDA 12.8, which Blackwell cards (sm_120) need. The host
+needs an NVIDIA driver of version 570 or newer.
+
+```bash
+docker build -t pianocover .
+docker run --gpus all -it -v /data:/data pianocover
+python scripts/check_env.py      # run this first: GPU support, one training step, one generation
+```
+
+`check_env.py` loads pretrained Transkun into the model and runs one bf16 training step
+through the semi-CRF and the style layers. It checks the style layers actually get
+gradients, generates 30 s of audio, and prints time and peak VRAM. If it says
+`ALL CHECKS PASSED`, the stack works on your card.
+
+## License-clear training
+
+**1. Prepare manifests** (CSV, paths relative to the file), one per source or combined:
+
+```csv
+id,audio,midi,source,license,song_id,offset
+fma_000123,audio/000123.mp3,midi/000123.mid,teacher,CC-BY-4.0,fma_000123,0
+acestep_007_jazz,audio/007_jazz.wav,midi/007.mid,silver,ace-step,arr_007,0
+gold_0042,audio/0042.mp3,midi/0042_cover.mid,gold,work-for-hire,song_0042,0
+```
+
+The MIDI must already be on the song's timeline. `offset` shifts it by a fixed number of
+seconds if needed. `song_id` keeps all versions of one song in the same train/val split.
+
+**2. Import** each manifest. Every row passes a license gate first:
+
+```bash
+python -m pianocover.import_aligned manifests/teacher.csv --out /data/ds_teacher
+python -m pianocover.import_aligned manifests/silver.csv  --out /data/ds_silver
+python -m pianocover.import_aligned manifests/gold.csv    --out /data/ds_gold
+```
+
+- **Accepted:** `CC0`, `CC-BY-*`, `public-domain`, `owned`, `work-for-hire`, `commissioned`,
+  `ace-step`.
+- **Always refused:** anything NC (non-commercial) or ND (no derivatives).
+- **Refused unless `--allow-sharealike`:** share-alike (SA) licenses.
+- **Also refused:** unknown or unrecognised license strings.
+
+Refusals are listed in `import_report.csv`.
+
+**3. Merge** into one dataset. `--licensed-only` drops anything without an accepted license:
+
+```bash
+python -m pianocover.merge_datasets /data/ds_teacher /data/ds_silver /data/ds_gold \
+    --out /data/ds_all --licensed-only
+```
+
+**4. Train in two stages on the same merged dataset**, so both stages share one set of style
+statistics:
+
+```bash
+# stage 1: learn faithful, playable reductions (starts from pretrained Transkun)
+python -m pianocover.train --train /data/ds_all/train.pkl --val /data/ds_all/val.pkl \
+    --style-stats /data/ds_all/style_stats.json --out /data/runs/stage1 \
+    --source-weights teacher=1,silver=1,gold=1
+
+# stage 2: polish on human covers, select the checkpoint on gold validation songs only
+python -m pianocover.train --train /data/ds_all/train.pkl --val /data/ds_all/val.pkl \
+    --style-stats /data/ds_all/style_stats.json --out /data/runs/stage2 \
+    --init /data/runs/stage1/best.pt --source-weights gold=1,teacher=0.1,silver=0 \
+    --val-sources gold --lr-backbone 2e-5 --lr-heads 1e-4 --lr-film 3e-4 --steps 15000
+```
+
+A small share of teacher data in stage 2 limits forgetting. `0` excludes a source entirely.
+
+## Training on a 12 GB card
+
+The defaults are `--batch-size 2 --accum 2`, an effective batch of 4 that fits an RTX 5070.
+On a 24 GB card, use `--batch-size 4 --accum 1` for speed. If you still run out of memory,
+use `--chunk-sec 12`.
+
+**Rough budget.** These figures are estimates, not measurements:
+- A full 60k-step stage 1 takes a few days on a 5070. Do a smoke test first with
+  `--steps 500 --val-every 250`.
+- Disk: about 21 MB of 44.1 kHz mono WAV per 4-minute song.
+
+## Research-only web data
+
+These steps are for experiments only, not for a product you sell:
+
+```bash
+python -m pianocover.download pairs/pop2piano_train_dataset.csv pairs/amtapc_src.json --out /data/raw
+python -m pianocover.transcribe_covers --data /data/raw
+python -m pianocover.build_dataset --data /data/raw --out /data/ds_web
+```
+
+These items are tagged `license=unknown`, so `merge_datasets --licensed-only` always drops
+them. `scripts/run_all.sh` runs this web flow end to end.
+
+## Use it from the transcription server
+
+```python
+from pianocover.infer import generate_cover
+from pianocover.events import to_pretty_midi
+
+ev = generate_cover("song.mp3", "/data/runs/stage2/best.pt", device="cuda", style="simple", quantize=True)
+to_pretty_midi(ev).write("cover.mid")
+```
+
+The model is loaded once and stays cached for later calls.
+
+## Monitoring
+
+`log.csv` has the training loss per second of audio, plus these validation metrics:
+- `val_nll_per_sec`: what `best.pt` is selected on;
+- `val_onset_f1`: the match against the reference cover. It is low by nature because many
+  valid covers exist; AMT-APC reported about 0.27;
+- `val_density_ratio`: should stay near 1.0 when the cover's own style is used.
+
+Each epoch also prints the share of chunks sampled from each source.
+`evaluate.py --baseline` scores plain Transkun on the same songs.
+
+## Troubleshooting
+
+- **The loss becomes NaN.** Add `--no-amp`. Normally only the backbone runs in bf16 and the
+  semi-CRF stays in fp32, but turning bf16 off rules it out.
+- **`no kernel image` / sm_120 errors.** You're not on the CUDA 12.8 image, or the host
+  driver is older than 570. `check_env.py` reports which.
+- **Covers come out too dense or too sparse.** Check `val_density_ratio`, then steer with
+  `--style` / `--set log_onset_rate=...`.
+- **Unit tests.** Run `python tests/test_core.py`. These cover the code that doesn't need
+  PyTorch.
+
+## Licensing
+
+- **Code:** this repo, Transkun and AMT-APC are all MIT.
+- **Transkun's pretrained weights:** they were trained on MAESTRO (CC BY-NC-SA). You rely
+  on the position that model weights aren't copies or adaptations of their training data.
+  An email to Transkun's author confirming the bundled checkpoint is MIT would remove
+  any doubt.
+- **License-clear data:** only teacher, silver and gold pairs with accepted licenses.
+  Keep your work-for-hire contracts and the CC license records of every song.
+- **CC BY songs** require attribution. Keep the import manifests; they are your
+  attribution list.
+- I'm not a lawyer; get proper advice before selling a model trained this way.

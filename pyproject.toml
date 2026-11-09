@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pianocover"
+version = "0.1.0"
+description = "Style-conditioned piano cover generation by fine-tuning Transkun"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+pianocover-download = "pianocover.download:main"
+pianocover-transcribe-covers = "pianocover.transcribe_covers:main"
+pianocover-build-dataset = "pianocover.build_dataset:main"
+pianocover-train = "pianocover.train:main"
+pianocover-infer = "pianocover.infer:main"
+pianocover-evaluate = "pianocover.evaluate:main"
+
+[tool.setuptools]
+packages = ["pianocover"]
