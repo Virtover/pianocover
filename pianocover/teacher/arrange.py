@@ -243,22 +243,35 @@ class Song:
         g = np.concatenate(g)
         return g[(g >= 0) & (g < self.duration)]
 
-    def correct_pitches(self, ev: np.ndarray, min_dur: float = 0.0) -> np.ndarray:
-        """Fix semitone slips: an out-of-key note at least `min_dur` long whose neighbour a
-        semitone away is a tone of the current chord moves to that chord tone."""
+    def clean_pitches(self, ev: np.ndarray, short: float = 0.25, snap_min: float = 0.15):
+        """Remove / fix transcription errors without inventing notes.
+
+        Only notes that are BOTH outside the key and outside the current chord are suspects
+        (in-key passing tones and chromatic chord tones are kept). A suspect is:
+          * moved one semitone to a chord tone if that neighbour exists and it lasts >= snap_min;
+          * otherwise dropped if shorter than `short` (scoops, slides, vibrato, bleed);
+          * otherwise kept (long deliberate notes, e.g. blue notes).
+        Returns (cleaned events, suspect mask over the INPUT rows)."""
         ev = ev.copy()
+        keep = np.ones(len(ev), bool)
+        suspect = np.zeros(len(ev), bool)
         for i in range(len(ev)):
             pc = int(ev[i, PITCH]) % 12
-            if pc in self.key_pcs or ev[i, END] - ev[i, START] < min_dur:
+            if pc in self.key_pcs:
                 continue
             c = self.chord_at(0.5 * (ev[i, START] + ev[i, END]))
-            if c is None:
+            if c is not None and pc in c[3]:
                 continue
-            for d in (-1, 1):
-                if (pc + d) % 12 in c[3]:
+            suspect[i] = True
+            dur = ev[i, END] - ev[i, START]
+            if c is not None and dur >= snap_min:
+                d = next((d for d in (-1, 1) if (pc + d) % 12 in c[3]), 0)
+                if d:
                     ev[i, PITCH] += d
-                    break
-        return ev
+                    continue
+            if dur < short:
+                keep[i] = False
+        return ev[keep], suspect
 
 
 # --------------------------------------------------------------------------- parts
@@ -299,7 +312,18 @@ def piano_bars(song: Song, min_notes: int = 6, min_agree: float = 0.4, min_range
 def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     a = song.a
     vocal = drop_short(merge_same_pitch(monophonize(_notes(a.vocal))), 0.06)
-    vocal = song.correct_pitches(vocal, min_dur=0.15)
+    cleaned, suspect = song.clean_pitches(vocal)
+    # bars where most of the "melody" fails the check are not a sung melody (rap, speech,
+    # bleed into the vocal stem): drop the vocal there, the lead of 'other' may take over
+    bad_bars = 0
+    for s in song.bars:
+        in_bar = (vocal[:, START] >= s) & (vocal[:, START] < s + song.bar_len) if len(vocal) else np.zeros(0, bool)
+        if in_bar.sum() >= 4 and suspect[in_bar].mean() > 0.35:
+            cleaned = cleaned[(cleaned[:, START] < s) | (cleaned[:, START] >= s + song.bar_len)]
+            bad_bars += 1
+    stats["vocal_bars_rejected"] = bad_bars
+    stats["vocal_notes_removed"] = int(len(vocal) - len(cleaned))
+    vocal = cleaned
     parts = [vocal] if len(vocal) else []
     other = _notes(a.other)
     filled = 0
@@ -311,7 +335,7 @@ def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
         # a lead line (riff / solo / hook) is mostly single-line; strummed chords are not
         if len(seg) < 3 or mean_polyphony(seg, s, e) > 2.2:
             continue
-        lead = monophonize(seg, prefer="high")
+        lead, _ = song.clean_pitches(monophonize(seg, prefer="high"), short=0.15)
         if len(lead):
             parts.append(lead)
             filled += 1
@@ -333,7 +357,9 @@ def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
 def bass_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     a = song.a
     bass = drop_short(merge_same_pitch(monophonize(_notes(a.bass), prefer="low")), 0.08)
-    bass = song.correct_pitches(bass, min_dur=0.2)
+    n_raw = len(bass)
+    bass, _ = song.clean_pitches(bass, short=0.2, snap_min=0.2)
+    stats["bass_notes_removed"] = n_raw - len(bass)
     bass = fold_phrases(bass, 36, 47, clamp=(28, 55))
     fallback = 0
 

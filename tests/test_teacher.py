@@ -147,6 +147,19 @@ def test_guitar_riff_becomes_melody_without_vocals():
     assert stats["melody_notes"] > 50, stats
 
 
+def test_clean_pitches_drops_snaps_keeps():
+    song = Song(synthetic_song())  # C major, bar 0 = C chord (0.0-2.0 s)
+    ev = np.array([
+        [0.10, 0.20, 66, 80],  # F#: off-key, not in C chord, short -> dropped
+        [0.30, 0.80, 61, 80],  # C#: off-key, long, C is a semitone below -> snapped to 60
+        [0.90, 1.00, 62, 80],  # D: in key (passing tone) -> kept as is
+        [1.10, 1.60, 70, 80],  # Bb: off-key, long, no chord tone a semitone away -> kept
+    ])
+    out, suspect = song.clean_pitches(ev)
+    assert suspect.tolist() == [True, True, False, True], suspect
+    assert out[:, PITCH].tolist() == [60, 62, 70], out
+
+
 def test_energy_drives_density():
     a = synthetic_song()
     ev, _ = arrange(a, "normal")
