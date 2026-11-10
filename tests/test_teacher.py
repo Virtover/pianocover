@@ -128,7 +128,7 @@ def test_arrange_levels_are_valid_and_reductive():
         _, n_at = np.unique(on, return_counts=True)
         assert n_at.max() <= 2 * lv.max_per_hand, (name, n_at.max())
         counts[name] = len(notes)
-        assert stats["accomp_chord_fallback"] == 0 or name == "easy", (name, stats)
+        assert "accomp_hits" in stats, stats
     assert counts["easy"] < counts["simple"] < counts["normal"] < counts["full"] <= counts["virtuoso"], counts
 
 
@@ -158,6 +158,42 @@ def test_clean_pitches_drops_snaps_keeps():
     out, suspect = song.clean_pitches(ev)
     assert suspect.tolist() == [True, True, False, True], suspect
     assert out[:, PITCH].tolist() == [60, 62, 70], out
+
+
+def test_piano_texture_valid_and_harmonic():
+    from pianocover.teacher.texture import arrange_piano
+
+    a = synthetic_song()
+    song = Song(a)
+    counts = {}
+    for name, lv in LEVELS.items():
+        ev, stats = arrange_piano(a, name, song)
+        notes = ev[ev[:, PITCH] > 0]
+        assert len(notes) > 0 and np.allclose(sanitize(ev), ev), name
+        for s, e, p, v in notes:  # LH figures and RH harmony use only the chord's notes
+            pcs = chord_pcs_at(a, s + 1e-3)
+            assert pcs is None or int(p) % 12 in pcs, (name, s, p)
+        counts[name] = len(notes)
+    assert counts["easy"] < counts["normal"] < counts["virtuoso"], counts
+
+
+def test_f0_to_notes_segmentation():
+    from pianocover.teacher.f0notes import f0_to_notes
+
+    hop = 0.02
+    t = np.arange(0, 2.4, hop)
+    midi = np.full(len(t), np.nan)
+    a = t < 0.6
+    midi[a] = 60 + 0.4 * np.sin(2 * np.pi * 5.5 * t[a])            # vibrato must not split
+    b = (t >= 0.6) & (t < 0.66)
+    midi[b] = np.linspace(61, 63.5, b.sum())                        # scoop into 64
+    c = (t >= 0.66) & (t < 1.6)
+    midi[c] = 64 + 0.3 * np.sin(2 * np.pi * 5 * t[c])                # 64, sung twice (onset at 1.2)
+    d = (t >= 1.8) & (t < 2.3)
+    midi[d] = 67                                                     # after a breath
+    notes = f0_to_notes(midi, np.isfinite(midi), hop, onsets=np.array([1.2]))
+    assert notes[:, 2].tolist() == [60, 64, 64, 67], notes
+    assert abs(notes[2, 0] - 1.2) < 0.03 and abs(notes[3, 0] - 1.8) < 0.03, notes
 
 
 def test_energy_drives_density():

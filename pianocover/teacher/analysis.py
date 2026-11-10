@@ -31,6 +31,8 @@ class Analysis:
     vocal_rms: np.ndarray             # (F,)
     other_rms: np.ndarray             # (F,)
     meta: dict = field(default_factory=dict)
+    # CREPE f0 -> notes on the vocal stem (preferred melody source; empty in old caches)
+    vocal_f0: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))
 
     def save(self, path) -> None:
         arrays = {}
@@ -57,8 +59,12 @@ class Analysis:
                 kw[f.name] = [str(x) for x in z[f.name]]
             elif f.name == "duration":
                 kw[f.name] = float(z[f.name])
+            elif f.name not in z:  # field added later (old cache)
+                continue
             else:
                 kw[f.name] = np.asarray(z[f.name], dtype=np.float64)
+        if "vocal_f0" in kw:
+            kw["vocal_f0"] = kw["vocal_f0"].reshape(-1, 4)
         for name in ("vocal", "bass", "other", "other_piano"):
             kw[name] = kw[name].reshape(-1, 4)
         kw["chords"] = kw["chords"].reshape(-1, 2)

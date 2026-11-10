@@ -78,6 +78,8 @@ class TeacherPipeline:
                           min_note_ms=70)
         other = self._step("bp_other", m.basic_pitch, stems["other"], SR, min_note_ms=60, melodia_trick=False)
         other_piano = self._step("transkun_other", m.transcribe_piano, stems["other"])
+        vocal_f0 = self._step("crepe_vocals", m.vocal_melody, stems["vocals"], SR,
+                              onsets=vocal[:, 0] if len(vocal) else None)
         drums = self._step("drum_onsets", drum_onsets, stems["drums"], SR)
         rms = self._step("rms", lambda: (rms_curve(mono), rms_curve(stems["vocals"]), rms_curve(stems["other"])))
         if save_stems_to is not None:
@@ -89,13 +91,17 @@ class TeacherPipeline:
         return Analysis(
             duration=mix.shape[1] / SR, beats=beats, downbeats=downbeats, chords=chord_spans,
             chord_labels=chord_labels, vocal=vocal, bass=bass, other=other, other_piano=other_piano,
-            drum_onsets=drums, mix_rms=rms[0], vocal_rms=rms[1], other_rms=rms[2],
+            drum_onsets=drums, mix_rms=rms[0], vocal_rms=rms[1], other_rms=rms[2], vocal_f0=vocal_f0,
             meta={"source_audio": str(audio_path), "demucs": "htdemucs", "basic_pitch": m.bp_provider},
         )
 
 
-def arrange_levels(a: Analysis, levels, keep_piano: bool | None = None):
+def arrange_levels(a: Analysis, levels, keep_piano: bool | None = None, texture: str = "reduction"):
     song = Song(a)
+    if texture == "piano":
+        from .texture import arrange_piano
+
+        return {lv: arrange_piano(a, lv, song) for lv in levels}
     return {lv: arrange(a, lv, song, keep_piano=keep_piano) for lv in levels}
 
 
@@ -119,7 +125,14 @@ def main(argv=None):
     ap.add_argument("--license", help="license for a single audio file")
     ap.add_argument("--rearrange", action="store_true", help="only re-run the arranger from cached analyses")
     ap.add_argument("--reanalyze", action="store_true", help="ignore cached analyses and run the models again")
+    ap.add_argument("--refresh-drums", action="store_true",
+                    help="recompute only the kick/snare/hi-hat onsets of cached analyses from saved stems")
+    ap.add_argument("--refresh-melody", action="store_true",
+                    help="recompute only the CREPE vocal melody of cached analyses from saved stems")
     ap.add_argument("--save-stems", action="store_true")
+    ap.add_argument("--texture", choices=["reduction", "piano"], default="reduction",
+                    help="reduction: band rhythms copied; piano: song's notes laid out as piano figures "
+                         "(files get a _piano suffix)")
     ap.add_argument("--keep-piano", action="store_true",
                     help="EXPERIMENTAL: keep piano-like bars of 'other' verbatim (misfires on guitar)")
     ap.add_argument("--device", default="cuda")
@@ -137,7 +150,7 @@ def main(argv=None):
     for sub in ("analysis", "midi"):
         (out / sub).mkdir(parents=True, exist_ok=True)
     rows = read_input(Path(args.input), args.license)[: args.limit]
-    pipe = None if args.rearrange else TeacherPipeline(device=args.device, demucs_shifts=args.demucs_shifts)
+    pipe = None if (args.rearrange and not args.refresh_melody) else TeacherPipeline(device=args.device, demucs_shifts=args.demucs_shifts)
 
     manifest, report = [], []
     for i, r in enumerate(rows, 1):
@@ -152,6 +165,30 @@ def main(argv=None):
             t0 = time.perf_counter()
             if npz.exists() and not args.reanalyze:
                 a = Analysis.load(npz)
+                if args.refresh_drums:
+                    stem = out / "stems" / f"{sid}_drums.flac"
+                    if stem.exists():
+                        import soundfile as sf
+
+                        from .models import drum_onsets
+
+                        y, sr = sf.read(str(stem), dtype="float32")
+                        a.drum_onsets = drum_onsets(y.mean(1) if y.ndim > 1 else y, sr)
+                        a.save(npz)
+                    else:
+                        print(f"[{i}/{len(rows)}] {sid}: no saved drum stem for --refresh-drums", flush=True)
+                if args.refresh_melody:
+                    stem = out / "stems" / f"{sid}_vocals.flac"
+                    if not stem.exists():
+                        print(f"[{i}/{len(rows)}] {sid}: no saved vocal stem for --refresh-melody "
+                              "(use --reanalyze)", flush=True)
+                    else:
+                        import soundfile as sf
+
+                        y, sr = sf.read(str(stem), dtype="float32")
+                        y = y.mean(1) if y.ndim > 1 else y
+                        a.vocal_f0 = pipe.m.vocal_melody(y, sr, onsets=a.vocal[:, 0] if len(a.vocal) else None)
+                        a.save(npz)
             elif args.rearrange:
                 print(f"[{i}/{len(rows)}] {sid}: no cached analysis, skipped", flush=True)
                 continue
@@ -161,16 +198,18 @@ def main(argv=None):
                 info.update({f"t_{k}": round(v["sec"], 3) for k, v in pipe.timings.items()})
                 info.update({f"vram_{k}": round(v["peak_mib"]) for k, v in pipe.timings.items()})
             t1 = time.perf_counter()
-            results = arrange_levels(a, levels, keep_piano=True if args.keep_piano else None)
+            results = arrange_levels(a, levels, keep_piano=True if args.keep_piano else None,
+                                     texture=args.texture)
             info["t_arrange_all"] = round(time.perf_counter() - t1, 3)
             info["t_total"] = round(time.perf_counter() - t0, 3)
             info["duration"] = round(a.duration, 1)
             for lv, (ev, stats) in results.items():
-                mid = out / "midi" / f"{sid}_{lv}.mid"
+                tag = f"{lv}_piano" if args.texture == "piano" else lv
+                mid = out / "midi" / f"{sid}_{tag}.mid"
                 events_mod.to_pretty_midi(ev).write(str(mid))
                 info.update({f"{lv}_{k}": v for k, v in stats.items() if k != "level"})
                 manifest.append({
-                    "id": f"{sid}_{lv}", "audio": r["audio_abs"], "midi": str(mid.resolve()),
+                    "id": f"{sid}_{tag}", "audio": r["audio_abs"], "midi": str(mid.resolve()),
                     "source": "teacher", "license": r["license"], "song_id": sid, "offset": 0,
                     "level": lv, "attribution": r.get("attribution", ""), "license_url": r.get("license_url", ""),
                 })

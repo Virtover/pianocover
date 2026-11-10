@@ -167,6 +167,43 @@ class TeacherModels:
         return ev[np.argsort(ev[:, 0], kind="stable")]
 
     @torch.inference_mode()
+    def vocal_melody(self, mono: np.ndarray, sr: int, onsets=None, hop_sec: float = 0.02,
+                     gate_db: float = 40.0, voiced_threshold: float = 0.3) -> np.ndarray:
+        """CREPE 'full' f0 on the vocal stem -> sung notes (see f0notes). Only regions where
+        the stem is not silent are analysed (saves 30-50% on typical songs).
+        Measured on a 3060 Ti: full model, 20 ms hop agrees with 10 ms on 99.9% of frames
+        at half the cost (~6.6 s for a 228 s stem without gating)."""
+        import torchcrepe
+
+        from .f0notes import f0_to_notes
+
+        y = resample(np.asarray(mono, np.float32), sr, 16000)
+        hop = int(round(hop_sec * 16000))
+        n_frames = len(y) // hop + 1
+        level = 20 * np.log10(rms_curve(y, 16000, hop_sec) + 1e-7)
+        level = np.pad(level, (0, max(n_frames - len(level), 0)), constant_values=-140)[:n_frames]
+        active = level > level.max() - gate_db
+        midi = np.full(n_frames, np.nan)
+        per = np.zeros(n_frames)
+        # contiguous active regions, padded and merged across short gaps
+        idx = np.where(active)[0]
+        if len(idx):
+            runs = np.split(idx, np.where(np.diff(idx) > int(0.3 / hop_sec))[0] + 1)
+            for r in runs:
+                a0, a1 = max(r[0] - 5, 0), min(r[-1] + 6, n_frames)
+                seg = torch.from_numpy(y[a0 * hop: a1 * hop])[None].to(self.device)
+                if seg.shape[1] < 1024:
+                    continue
+                f0, p = torchcrepe.predict(seg, 16000, hop, 65.0, 1100.0, "full", batch_size=512,
+                                           device=self.device, return_periodicity=True)
+                f0, p = f0[0].float().cpu().numpy(), p[0].float().cpu().numpy()
+                k = min(len(f0), a1 - a0)
+                midi[a0:a0 + k] = 12 * np.log2(np.maximum(f0[:k], 1e-3) / 440.0) + 69
+                per[a0:a0 + k] = p[:k]
+        voiced = (per >= voiced_threshold) & active
+        return f0_to_notes(midi, voiced, hop_sec, level_db=level - level.max(), onsets=onsets)
+
+    @torch.inference_mode()
     def transcribe_piano(self, mono: np.ndarray) -> np.ndarray:
         """Transkun on a 44.1 kHz mono signal -> (N, 4) incl. pedal rows (pitch -64/-67)."""
         from ..events import from_transkun_notes
@@ -206,21 +243,32 @@ class TeacherModels:
 
 
 # ---------------------------------------------------------------------- cheap DSP features
+KICK, SNARE, HAT = 0, 1, 2
+
+
 def drum_onsets(drums: np.ndarray, sr: int = SR) -> np.ndarray:
-    """Kick-ish (low band) and snare/hat-ish (high band) onsets -> (K, 3) [time, kind, strength]."""
+    """Kick / snare / hi-hat onsets from the drum stem -> (K, 3) [time, kind, strength].
+
+    One onset detector per band, each where that drum has energy the others mostly lack:
+    kick < 120 Hz, snare body 180-1200 Hz (hi-hats have almost nothing there), hi-hat > 7 kHz.
+    Heuristic (no drum-transcription model): toms land in 'snare', crashes in 'hat'."""
     import librosa
 
     y = resample(drums, sr, 22050)
     S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
     freqs = librosa.fft_frequencies(sr=22050, n_fft=1024)
     out = []
-    for kind, band in ((0, freqs < 150), (1, freqs > 1500)):
+    bands = ((KICK, freqs < 120), (SNARE, (freqs >= 180) & (freqs <= 1200)), (HAT, freqs > 7000))
+    for kind, band in bands:
         env = librosa.onset.onset_strength(S=librosa.amplitude_to_db(S[band] + 1e-6), sr=22050, hop_length=256)
         if env.max() <= 0:
             continue
         env = env / env.max()
+        # delta 0.2 / 46 ms spacing / strength >= 0.2: the looser default (delta 0.1) gave
+        # 2-3 kicks per beat on prototype songs (bass bleed, toms); this gives ~0.5-1 per beat
         peaks = librosa.onset.onset_detect(onset_envelope=env, sr=22050, hop_length=256, units="frames",
-                                           backtrack=False, delta=0.1)
+                                           backtrack=False, delta=0.2, wait=4, pre_max=3, post_max=3)
+        peaks = peaks[env[peaks] >= 0.2]
         t = librosa.frames_to_time(peaks, sr=22050, hop_length=256)
         out += [[ti, kind, env[p]] for ti, p in zip(t, peaks)]
     out = np.array(out, np.float64).reshape(-1, 3)

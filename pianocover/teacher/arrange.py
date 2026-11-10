@@ -21,6 +21,10 @@ What goes where:
                   country song), replacing the guitar reduction with a raw transcription.
                   Needs a real piano-presence classifier before it is turned on.
   * Density     = follows each bar's energy (louder sections -> more hits).
+  * Pedal       = re-pedalled every chord change / 2 beats, skipped where it would make
+                  notes rub (semitone clashes).
+  * Chord check = a detected chord that does not match what is played in its span is
+                  replaced by the most-played pitch classes there (Song._verify_chords).
   * Difficulty  = LEVELS controls how much of all this is kept.
 """
 
@@ -144,6 +148,75 @@ def fold_phrases(ev: np.ndarray, lo: float, hi: float, gap: float = 1.0,
     return ev
 
 
+def drop_ornaments(ev: np.ndarray, max_dur: float = 0.12, max_step: int = 2) -> np.ndarray:
+    """Remove scoops / slides / vibrato fragments of a monophonic line: a very short note
+    that leads straight (<60 ms) into a longer note at most `max_step` semitones away."""
+    if len(ev) < 2:
+        return ev.copy()
+    ev = ev[np.argsort(ev[:, START], kind="stable")]
+    keep = np.ones(len(ev), bool)
+    for i in range(len(ev) - 1):
+        d = ev[i, END] - ev[i, START]
+        nxt = ev[i + 1]
+        if d < max_dur and nxt[START] - ev[i, END] < 0.06 and abs(nxt[PITCH] - ev[i, PITCH]) <= max_step \
+                and nxt[END] - nxt[START] > d:
+            keep[i] = False
+            ev[i + 1, START] = min(ev[i + 1, START], ev[i, START])  # the note starts where the scoop did
+    return ev[keep]
+
+
+def smooth_octaves(ev: np.ndarray, max_leap: int = 9, lo: int = 55, hi: int = 96, gap: float = 1.0) -> np.ndarray:
+    """Inside a phrase, a leap larger than `max_leap` is almost always an octave error
+    (harmonic picked by the transcriber, or a vocal/riff splice): move the note by octaves
+    to the closest position to the previous note."""
+    if len(ev) < 2:
+        return ev.copy()
+    ev = ev[np.argsort(ev[:, START], kind="stable")].copy()
+    for i in range(1, len(ev)):
+        if ev[i, START] - ev[i - 1, END] > gap:
+            continue  # new phrase: keep its own register
+        prev, p = ev[i - 1, PITCH], ev[i, PITCH]
+        if abs(p - prev) <= max_leap:
+            continue
+        cands = [p + 12 * k for k in range(-3, 4) if lo <= p + 12 * k <= hi]
+        if cands:
+            ev[i, PITCH] = min(cands, key=lambda c: abs(c - prev))
+    return ev
+
+
+def snap_to_grid(ev: np.ndarray, grid: np.ndarray, tol: float) -> np.ndarray:
+    """Snap onsets to the nearest grid point when within `tol` seconds."""
+    if len(ev) == 0 or len(grid) < 2:
+        return ev.copy()
+    ev = ev.copy()
+    k = np.clip(np.searchsorted(grid, ev[:, START]), 1, len(grid) - 1)
+    nearest = np.where(ev[:, START] - grid[k - 1] <= grid[k] - ev[:, START], grid[k - 1], grid[k])
+    ok = np.abs(nearest - ev[:, START]) <= tol
+    ev[ok, START] = nearest[ok]
+    return ev
+
+
+def legato(ev: np.ndarray, max_gap: float, max_len: float, barriers=()) -> np.ndarray:
+    """Extend each note of a monophonic line to the next onset when the gap is small, so the
+    line sings instead of being chopped. Never extends across a barrier time (e.g. a chord
+    change) the note did not already reach."""
+    if len(ev) < 2:
+        return ev.copy()
+    ev = ev[np.argsort(ev[:, START], kind="stable")].copy()
+    barriers = np.asarray(sorted(barriers), np.float64)
+    for i in range(len(ev) - 1):
+        nxt = ev[i + 1, START]
+        if 0 <= nxt - ev[i, END] < max_gap:
+            new_end = min(nxt, ev[i, START] + max_len)
+            if len(barriers):
+                j = np.searchsorted(barriers, ev[i, END] + 1e-6)
+                if j < len(barriers) and barriers[j] < new_end:
+                    new_end = max(ev[i, END], barriers[j])
+            ev[i, END] = max(ev[i, END], new_end)
+        ev[i, END] = min(ev[i, END], nxt)  # never overlap the next note of the line
+    return ev
+
+
 def place_in_range(pitch: float, lo: float, hi: float) -> float:
     while pitch < lo:
         pitch += 12
@@ -185,6 +258,7 @@ class Song:
                 self.chords[-1] = (self.chords[-1][0], e) + self.chords[-1][2:]
             else:
                 self.chords.append((s, e) + (key or (None, None, None)))
+        self.chords_replaced = self._verify_chords()
         self._chord_starts = np.array([c[0] for c in self.chords]) if self.chords else np.zeros(0)
 
         # energy per bar, 0..1 within the song
@@ -199,6 +273,47 @@ class Song:
             self.bar_energy = np.convolve(padded, k, mode="valid")
 
         self.key_pcs = self._estimate_key()
+
+    def _verify_chords(self, min_agree: float = 0.55, min_weight: float = 0.5) -> int:
+        """Check each detected chord against what the song actually plays in that span
+        (other + piano + bass notes, weighted by sounding time). If the chord explains less
+        than `min_agree` of it, the label is wrong (seen on 2 of 10 prototype songs, where
+        filtering to it produced notes the song never plays): replace its pitch classes with
+        the most-played ones (at most 4, covering 75% of the time). Returns the count."""
+        a = self.a
+        src = np.concatenate([_notes(a.other), _notes(a.other_piano), _notes(a.bass)])
+        bass_src = _notes(a.bass)
+        if len(src) == 0:
+            return 0
+        replaced = 0
+        for i, (s, e, root, pcs, bass_pc) in enumerate(self.chords):
+            if root is None:
+                continue
+            ov = np.clip(np.minimum(src[:, END], e) - np.maximum(src[:, START], s), 0, None)
+            if ov.sum() < min_weight:
+                continue
+            w = np.zeros(12)
+            np.add.at(w, src[:, PITCH].astype(int) % 12, ov)
+            if w[list(pcs)].sum() / w.sum() >= min_agree:
+                continue
+            order = np.argsort(-w)
+            new, acc = [], 0.0
+            for pc in order[:4]:
+                if w[pc] <= 0 or acc >= 0.75 * w.sum():
+                    break
+                new.append(int(pc))
+                acc += w[pc]
+            bov = np.clip(np.minimum(bass_src[:, END], e) - np.maximum(bass_src[:, START], s), 0, None) \
+                if len(bass_src) else np.zeros(0)
+            if bov.sum() > 0:
+                bw = np.zeros(12)
+                np.add.at(bw, bass_src[:, PITCH].astype(int) % 12, bov)
+                bass_pc = int(np.argmax(bw))
+            else:
+                bass_pc = new[0]
+            self.chords[i] = (s, e, new[0], frozenset(new), bass_pc)
+            replaced += 1
+        return replaced
 
     @staticmethod
     def _mean_over(curve, s, e):
@@ -311,7 +426,12 @@ def piano_bars(song: Song, min_notes: int = 6, min_agree: float = 0.4, min_range
 
 def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     a = song.a
-    vocal = drop_short(merge_same_pitch(monophonize(_notes(a.vocal))), 0.06)
+    # CREPE f0 notes (monophonic tracker) when available: far more faithful than basic-pitch
+    # on vocals (basic-pitch agreed with CREPE on only 41-63% of sung frames)
+    from_f0 = len(getattr(a, "vocal_f0", ())) > 0
+    src = _notes(a.vocal_f0) if from_f0 else _notes(a.vocal)
+    vocal = drop_short(src if from_f0 else merge_same_pitch(monophonize(src)), 0.06)
+    stats["melody_source"] = "crepe" if from_f0 else "basic-pitch"
     cleaned, suspect = song.clean_pitches(vocal)
     # bars where most of the "melody" fails the check are not a sung melody (rap, speech,
     # bleed into the vocal stem): drop the vocal there, the lead of 'other' may take over
@@ -344,14 +464,60 @@ def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     if not parts:
         return empty()
     mel = monophonize(np.concatenate(parts))
+    # shape the transcribed line into a playable, flowing melody (same notes, cleaned up):
+    # basic-pitch splits one sung note into several (vibrato); CREPE notes are already whole
+    # and a same-pitch repeat there is a real re-articulation, so only merge tiny gaps
+    merge_gap = 0.03 if from_f0 else 0.15
+    mel = merge_same_pitch(mel, gap=merge_gap)
+    mel = drop_ornaments(mel)                       # scoops / slides into a note
     mel = fold_phrases(mel, 64, 79, clamp=(55, 96))
-    mel = drop_short(merge_same_pitch(mel), lv.melody_min_dur)
+    mel = smooth_octaves(mel)                       # octave errors -> no wild leaps
+    mel = merge_same_pitch(mel, gap=merge_gap)
+    mel = snap_to_grid(mel, song.grid(4), tol=0.4 * song.period / 4)
+    mel = monophonize(mel)                          # snapping may stack two onsets
+    changes = [c[0] for c in song.chords if c[2] is not None]
+    mel = legato(mel, max_gap=min(0.35, song.period), max_len=4 * song.period, barriers=changes)
+    mel = drop_short(mel, lv.melody_min_dur)
     if lv.melody_octaves:
         loud = np.array([song.energy_at(t) > 0.7 for t in mel[:, START]], bool)
         dbl = mel[loud & (mel[:, PITCH] - 12 >= 55)].copy()
         dbl[:, PITCH] -= 12
         mel = np.concatenate([mel, dbl])
     return mel
+
+
+def follow_kick(song: Song, bass: np.ndarray, on_beats_only: bool = False, min_strength: float = 0.3,
+                stats: dict | None = None) -> np.ndarray:
+    """The left hand follows the kick drum, as pop pianists do: where a kick hits while a
+    bass note is held (and the bass player does not re-attack), re-strike that bass note.
+    A sustained bass-guitar note sounds alive; a held piano note just decays."""
+    d = np.asarray(song.a.drum_onsets).reshape(-1, 3)
+    kicks = d[(d[:, 1] < 0.5) & (d[:, 2] >= min_strength), 0] if len(d) else np.zeros(0)
+    if on_beats_only and len(kicks):
+        near = np.min(np.abs(kicks[:, None] - song.beats[None, :]), axis=1) < 0.06
+        kicks = kicks[near]
+    if len(bass) == 0 or len(kicks) == 0:
+        return bass
+    grid = song.grid(4)
+    k = np.clip(np.searchsorted(grid, kicks), 1, len(grid) - 1)
+    kicks = np.where(kicks - grid[k - 1] <= grid[k] - kicks, grid[k - 1], grid[k])  # on the grid
+    out = [row.copy() for row in bass[np.argsort(bass[:, START], kind="stable")]]
+    added = 0
+    for t in np.unique(np.round(kicks, 4)):
+        if any(abs(r[START] - t) < 0.06 for r in out):
+            continue
+        for r in out:
+            if r[START] + 0.08 < t < r[END] - 0.08:
+                new = r.copy()
+                new[START] = t
+                r[END] = t
+                out.append(new)
+                added += 1
+                break
+    if stats is not None:
+        stats["bass_kick_restrikes"] = added
+    out = np.array(out)
+    return out[np.argsort(out[:, START], kind="stable")]
 
 
 def bass_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
@@ -397,6 +563,11 @@ def bass_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     else:
         bass = bass.copy()
         bass[on_grid, START] = nearest[on_grid]
+        bass = monophonize(bass, prefer="low")
+        changes = [c[0] for c in song.chords if c[2] is not None]
+        bass = legato(bass, max_gap=song.period, max_len=2 * song.period, barriers=changes)
+    if lv.bass_mode in ("on_beats", "line", "line_octave"):
+        bass = follow_kick(song, bass, on_beats_only=lv.bass_mode == "on_beats", stats=stats)
     if lv.bass_mode == "line_octave":
         bar_starts = np.array([abs(song.bars[song.bar_index(t)] - t) < 0.08 for t in bass[:, START]], bool)
         octv = bass[bar_starts].copy()
@@ -432,7 +603,10 @@ def onset_strength(song: Song, grid: np.ndarray) -> np.ndarray:
         add(np.array([c[0] for c in clusters]), np.array([w * min(len(c), 3) / 3 for c in clusters]))
     d = np.asarray(a.drum_onsets).reshape(-1, 3)
     if len(d):
-        add(d[:, 0], np.where(d[:, 1] > 0.5, 0.5, 0.3) * np.clip(d[:, 2], 0, 1))
+        # snare backbeat drives the chord hits most, kick a little, hi-hats only lightly
+        # (kind: 0 kick, 1 snare, 2 hi-hat; old 2-band caches only have 0 / 1)
+        w_kind = np.select([d[:, 1] < 0.5, d[:, 1] < 1.5], [0.4, 0.8], 0.15)
+        add(d[:, 0], w_kind * np.clip(d[:, 2], 0, 1))
     b = _notes(a.bass)
     if len(b):
         add(b[:, START], np.full(len(b), 0.3))
@@ -454,75 +628,110 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
     pool = np.concatenate([_notes(a.other), _notes(a.other_piano)])
     pool_sal = np.concatenate([np.full(len(_notes(a.other)), 1.0), np.full(len(_notes(a.other_piano)), 0.8)])
 
-    chord_starts = {round(c[0], 3) for c in song.chords if c[2] is not None}
+    chord_starts = sorted(c[0] for c in song.chords if c[2] is not None)
+    step = song.period / lv.accomp_subdiv
+
+    # --- groove: ONE rhythm pattern per 4-bar section, from that section's combined onsets,
+    # repeated in each of its bars (copying every bar's onsets separately gave a different
+    # rhythm every bar: groove similarity 0.23-0.66 on the prototype songs)
+    bar_idx = np.array([song.bar_index(t) for t in grid])
+    pos = np.round((grid - song.bars[bar_idx]) / step).astype(int)
+    group = bar_idx // 4
+    pattern = {}
+    for g in np.unique(group):
+        m = group == g
+        e_g = float(np.mean([song.bar_energy[b] for b in np.unique(bar_idx[m])]))
+        thr = lv.accomp_threshold * (1.3 - 0.6 * e_g)
+        for p in np.unique(pos[m]):
+            mp = m & (pos == p)
+            pattern[(g, p)] = float(strength[mp].mean()) >= thr
     slots = []
     for i, t in enumerate(grid):
-        if skip_bars[song.bar_index(t)]:
+        if skip_bars[bar_idx[i]]:
             continue
-        e = song.energy_at(t)
-        thr = lv.accomp_threshold * (1.3 - 0.6 * e)
-        at_change = any(abs(t - cs) < 0.5 * song.period / lv.accomp_subdiv for cs in chord_starts)
-        at_bar = abs(song.bars[song.bar_index(t)] - t) < 0.02 and e > 0.3
-        if strength[i] >= thr or at_change or at_bar:
+        at_change = any(abs(t - cs) < 0.5 * step for cs in chord_starts)
+        at_bar = pos[i] == 0 and song.bar_energy[bar_idx[i]] > 0.3
+        if pattern.get((group[i], pos[i]), False) or at_change or at_bar:
             slots.append(t)
     slots = np.array(sorted(set(np.round(slots, 4))))
 
-    out, prev, fallback = [], None, 0
+    # --- voicing: chosen ONCE per chord span from the notes the song plays in that span
+    # (restless re-voicing on every hit was 13-67% of hits on the prototype songs)
+    span_pcs = {}
+
+    def pcs_for(t):
+        c = song.chord_at(t + 0.02)
+        if c is not None:
+            key, s, e, allowed = ("c", round(c[0], 3)), c[0], c[1], c[3]
+        else:
+            b = song.bar_index(t)
+            key, s, e, allowed = ("b", b), song.bars[b], song.bars[b] + song.bar_len, None
+        if key not in span_pcs:
+            ov = np.clip(np.minimum(pool[:, END], e) - np.maximum(pool[:, START], s), 0, None)
+            w = {}
+            for row, o, sal in zip(pool, ov, pool_sal):
+                pc = int(row[PITCH]) % 12
+                if o <= 0 or (allowed is not None and pc not in allowed):
+                    continue
+                w[pc] = w.get(pc, 0.0) + o * sal * row[VEL]
+            chosen = []
+            for pc, _ in sorted(w.items(), key=lambda x: -x[1]):
+                if len(chosen) >= lv.accomp_notes:
+                    break
+                if any((pc - q) % 12 in (1, 11) for q in chosen):
+                    continue  # never voice two pitch classes a semitone apart
+                chosen.append(pc)
+            span_pcs[key] = chosen
+        pcs = span_pcs[key]
+        # of the span's voicing, keep what is actually heard within a beat of this hit (the
+        # band may play a riff elsewhere in the span); nothing heard -> whole span voicing
+        win = (pool[:, START] < t + song.period) & (pool[:, END] > t - song.period)
+        heard = set(pool[win, PITCH].astype(int) % 12)
+        return ([pc for pc in pcs if pc in heard] or pcs), c
+
+    out, prev, empty_spans = [], None, 0
     for j, t in enumerate(slots):
         nxt = slots[j + 1] if j + 1 < len(slots) else song.duration
-        c = song.chord_at(t + 0.02)
+        pcs, c = pcs_for(t)
+        if not pcs:
+            empty_spans += 1
+            continue  # the song plays nothing harmonic here: no invented chord
         e = song.energy_at(t)
         # range: above the bass, below the melody, at most one hand span wide
         mel_now = melody[(melody[:, START] <= t + 0.05) & (melody[:, END] > t)] if len(melody) else melody
-        hi = (mel_now[:, PITCH].min() - 1) if len(mel_now) else 76
-        hi = min(hi, 76)
+        hi = min((mel_now[:, PITCH].min() - 1) if len(mel_now) else 76, 76)
         b_now = bass[(bass[:, START] <= t + 0.05) & (bass[:, END] > t)] if len(bass) else bass
         lo = max(48, (b_now[:, PITCH].max() + 3) if len(b_now) else 48)
         lo = min(lo, hi - 11)
-        # real notes heard around this hit (strum / chord) or still sounding through it
-        near = ((pool[:, START] >= t - 0.08) & (pool[:, START] <= t + 0.08)) | \
-               ((pool[:, START] < t) & (pool[:, END] > t + 0.05))
-        cand = pool[near]
-        sal = pool_sal[near] * cand[:, VEL] * np.minimum(cand[:, END] - cand[:, START], 1.0) if len(cand) else []
-        pc_weight = {}
-        for row, s in zip(cand, sal):
-            pc = int(row[PITCH]) % 12
-            if c is not None and pc not in c[3]:
-                continue  # chord filter: drop non-chord tones (mostly transcription noise)
-            pc_weight[pc] = pc_weight.get(pc, 0.0) + float(s)
-        if not pc_weight:
-            # nothing heard: only at a chord change do we fall back to chord tones (logged),
-            # so sparse songs stay sparse instead of being re-harmonised from the chord track
-            at_change = any(abs(t - cs) < 0.5 * song.period / lv.accomp_subdiv for cs in chord_starts)
-            if c is None or not at_change:
-                continue
-            pc_weight = {pc: 1.0 for pc in c[3]}
-            fallback += 1
-        pcs = [pc for pc, _ in sorted(pc_weight.items(), key=lambda x: -x[1])][: lv.accomp_notes]
         voicing = []
         for pc in pcs:
-            # closest to the previous voicing (smooth voice leading), else as high as possible
             options = [p for p in range(int(lo), int(hi) + 1) if p % 12 == pc]
             if not options:
                 continue
-            if prev:
-                p = min(options, key=lambda q: min(abs(q - r) for r in prev))
-            else:
-                p = max(options)
+            # keep the previous position when possible (stable, smooth voice leading)
+            p = min(options, key=lambda q: min(abs(q - r) for r in prev)) if prev else max(options)
             voicing.append(p)
         if not voicing:
             continue
         top = max(voicing)
         voicing = sorted({p for p in voicing if top - p <= lv.span})
-        prev = voicing
         end = min(nxt, t + 2 * song.period) - 0.02
         if c is not None:
             end = min(end, max(c[1], t + 0.1))
+        # melody and bass win: drop voicing notes a semitone from anything they sound meanwhile
+        others = [x for x in (melody, bass) if len(x)]
+        if others:
+            o = np.concatenate(others)
+            o_pcs = set(o[(o[:, START] < end) & (o[:, END] > t), PITCH].astype(int) % 12)
+            voicing = [p for p in voicing if not any((p - q) % 12 in (1, 11) for q in o_pcs)]
+        if not voicing:
+            continue
+        prev = voicing
         vel = 42 + 30 * e
         for p in voicing:
             out.append([t, max(end, t + 0.08), p, vel])
     stats["accomp_hits"] = len(slots)
-    stats["accomp_chord_fallback"] = fallback
+    stats["accomp_empty_spans"] = empty_spans
     return np.array(out, np.float64).reshape(-1, 4)
 
 
@@ -542,15 +751,26 @@ def verbatim_piano(song: Song, bars_mask: np.ndarray, melody: np.ndarray) -> np.
     return out
 
 
-def pedal_part(song: Song) -> np.ndarray:
+def pedal_part(song: Song, notes: np.ndarray, beats_per_pedal: int = 2) -> np.ndarray:
+    """Sustain pedal that never creates a semitone rub.
+
+    Re-pedal at every chord change and every `beats_per_pedal` beats; a span gets pedal
+    only if all notes sounding in it (held by the pedal) are free of semitone / major-7th
+    clashes. Holding one pedal over a whole chord made passing tones and the moving bass
+    ring together: 19-31% of the time had a semitone rub vs 1-7% without pedal (10 songs)."""
+    notes = notes[notes[:, PITCH] > 0]
+    changes = sorted({c[0] for c in song.chords if c[2] is not None})
+    cuts = np.unique(np.concatenate([song.beats[::beats_per_pedal], changes, [0.0, song.duration]]))
+    cuts = cuts[(cuts >= 0) & (cuts <= song.duration)]
     out = []
-    spans = [(c[0], c[1]) for c in song.chords if c[2] is not None] or \
-            [(b, b + song.bar_len) for b in song.bars]
-    for s, e in spans:
-        cuts = [s] + [b for b in song.bars if s + 0.2 < b < e - 0.2] + [e]
-        for cs, ce in zip(cuts[:-1], cuts[1:]):
-            if ce - cs > 0.25:
-                out.append([cs + 0.03, ce - 0.04, -64, 127])
+    for cs, ce in zip(cuts[:-1], cuts[1:]):
+        if ce - cs < 0.25:
+            continue
+        inside = notes[(notes[:, START] < ce) & (notes[:, END] > cs)]
+        pcs = sorted(set(inside[:, PITCH].astype(int) % 12))
+        if any((b - a) % 12 in (1, 11) for i, a in enumerate(pcs) for b in pcs[i + 1:]):
+            continue
+        out.append([cs + 0.03, ce - 0.04, -64, 127])
     return np.array(out, np.float64).reshape(-1, 4)
 
 
@@ -581,8 +801,9 @@ def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_p
         bass[:, VEL] = 50 + 30 * np.array([song.energy_at(t) for t in bass[:, START]])
 
     parts = [melody, bass, accomp, piano]
+    stats["chords_replaced"] = song.chords_replaced
     if lv.pedal:
-        parts.append(pedal_part(song))
+        parts.append(pedal_part(song, np.concatenate([p.reshape(-1, 4) for p in parts])))
     ev = sanitize(np.concatenate([p.reshape(-1, 4) for p in parts]))
     ev = limit_hands(ev, max_per_hand=lv.max_per_hand, span=lv.span)
     ev = sanitize(drop_ghost_notes(ev))
