@@ -285,7 +285,9 @@ class Song:
 
         def z(x):
             lo_, hi_ = np.percentile(x, 5), np.percentile(x, 95)
-            return (x - lo_) / max(hi_ - lo_, 1e-6)
+            if hi_ - lo_ < 0.15 * (abs(hi_) + 1e-9):  # (nearly) constant over the song: no information,
+                return np.zeros_like(x)                # do not blow its wobble up to full scale
+            return np.clip((x - lo_) / (hi_ - lo_), -0.5, 1.5)  # outliers must not set the scale
 
         def rate(times, weights=None):
             h = np.zeros(n)
@@ -840,6 +842,96 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
     return np.array(out, np.float64).reshape(-1, 4)
 
 
+def accompaniment_faithful(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarray, stats: dict) -> np.ndarray:
+    """Accompaniment = what the guitars / keys really play, not a re-voiced pattern.
+
+    Listening feedback: the raw transcribed parts sound like the song, the pattern-based
+    accompaniment does not. So keep the transcribed notes of 'other' at their own times,
+    in their own shapes (riffs, arpeggios, strums), and only:
+      * drop transcription errors (neither in key nor in the chord, short),
+      * snap to the 16th grid, move by octaves into the space between bass and melody,
+      * drop notes that rub against the melody / bass (a semitone apart),
+      * thin to what the level and the section tier allow (notes per hit, hits per beat),
+        keeping the most salient notes and the hits on the beat.
+    """
+    a = song.a
+    pool = _notes(a.other)
+    if len(pool) == 0:
+        return empty()
+    pool = drop_short(pool, 0.06)
+    pool, _ = song.clean_pitches(pool, short=0.25, snap_min=10.0)   # drop only, never move
+    step = song.period / 4
+    pool = snap_to_grid(pool, song.grid(4), tol=0.45 * step)
+    pool = pool[np.argsort(pool[:, START], kind="stable")]
+
+    per_hit = {"easy": 1, "simple": 2, "normal": 3, "full": 4, "virtuoso": 4}[lv.name]
+    per_beat = {"easy": 1, "simple": 1, "normal": 2, "full": 4, "virtuoso": 4}[lv.name]
+    others = [x for x in (melody, bass) if len(x)]
+    ob = np.concatenate(others) if others else np.zeros((0, 4))
+
+    out, kept_hits, heard_hits = [], 0, 0
+    for b0, b1 in zip(song.beats[:-1], song.beats[1:]):
+        seg = pool[(pool[:, START] >= b0 - 1e-6) & (pool[:, START] < b1 - 1e-6)]
+        if len(seg) == 0:
+            continue
+        tier = song.tier_at(b0)
+        k_notes = max(1, per_hit + (tier >= 2) - (tier == 0))
+        k_hits = max(1, int(round(per_beat * (0.5, 1.0, 1.0, 1.0)[tier])))
+        # fills: while the melody rests, the instruments answer (one more note, a bit louder)
+        gap = not len(melody) or not ((melody[:, START] < b1) & (melody[:, END] > b0)).any()
+        k_notes += int(gap and lv.name not in ("easy",))
+        onsets = np.unique(np.round(seg[:, START], 3))
+        heard_hits += len(onsets)
+        groups = []
+        for t in onsets:
+            g = seg[np.abs(seg[:, START] - t) < 2e-3]
+            sal = g[:, VEL] * np.minimum(g[:, END] - g[:, START], 1.0)
+            on_beat = abs(t - b0) < 0.25 * step
+            on_8th = abs((t - b0) - 0.5 * (b1 - b0)) < 0.25 * step
+            groups.append((sal.sum() * (2.0 if on_beat else 1.3 if on_8th else 1.0), t, g, sal))
+        if lv.name in ("easy", "simple"):  # hits on the beat only
+            groups = [x for x in groups if abs(x[1] - b0) < 0.25 * step] or groups[:1]
+        for _, t, g, sal in sorted(groups, key=lambda x: -x[0])[:k_hits]:
+            mel_now = melody[(melody[:, START] <= t + 0.05) & (melody[:, END] > t)] if len(melody) else melody
+            hi = int(min((mel_now[:, PITCH].min() - 1) if len(mel_now) else 79, 81))
+            b_now = bass[(bass[:, START] <= t + 0.05) & (bass[:, END] > t)] if len(bass) else bass
+            lo = int(max(48, (b_now[:, PITCH].max() + 2) if len(b_now) else 48))
+            lo = min(lo, hi - 11)
+            # thick textures: keep the notes where a hand can reach them (the playability
+            # filter otherwise drops them). Melody in octaves -> fill inside that octave
+            # (full right-hand chord); bass in octaves struck now -> the hit goes to the RH.
+            if len(mel_now) > 1 and np.ptp(mel_now[:, PITCH]) == 12:
+                hi, lo = int(mel_now[:, PITCH].max() - 1), int(mel_now[:, PITCH].min() + 1)
+            elif len(b_now) > 1 and np.ptp(b_now[:, PITCH]) == 12 and (b_now[:, START] > t - 0.05).any()                     and hi - 60 >= 4:
+                lo = max(lo, 60)
+            if gap:
+                hi = max(hi, 84) if not len(mel_now) else hi
+            end_max = t + 2 * song.period
+            clash = set(ob[(ob[:, START] < t + step) & (ob[:, END] > t), PITCH].astype(int) % 12) if len(ob) else set()
+            chosen = {}
+            for i in np.argsort(-sal):
+                p = int(g[i, PITCH])
+                while p > hi:
+                    p -= 12
+                while p < lo:
+                    p += 12
+                if p > hi or p in chosen:
+                    continue
+                if any((p - q) % 12 in (1, 11) for q in clash) or any(abs(p - q) == 1 for q in chosen):
+                    continue
+                chosen[p] = min(max(g[i, END], t + 0.1), end_max)
+                if len(chosen) >= k_notes:
+                    break
+            if not chosen:
+                continue
+            kept_hits += 1
+            vel = 22 + 88 * min(song.dyn_at(t), 1.0) ** 1.2 + (8 if gap else 0)
+            out += [[t, e, p, vel] for p, e in chosen.items()]
+    stats["accomp_hits"] = kept_hits
+    stats["accomp_hits_heard"] = heard_hits
+    return np.array(out, np.float64).reshape(-1, 4)
+
+
 def verbatim_piano(song: Song, bars_mask: np.ndarray, melody: np.ndarray) -> np.ndarray:
     tk = np.asarray(song.a.other_piano, np.float64).reshape(-1, 4)
     keep = np.zeros(len(tk), bool)
@@ -880,7 +972,11 @@ def pedal_part(song: Song, notes: np.ndarray, beats_per_pedal: int = 2) -> np.nd
 
 
 # --------------------------------------------------------------------------- entry point
-def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_piano: bool | None = None):
+ACCOMP_MODE = "pattern"   # "pattern": re-voiced chords on a grid pattern (default; rated better by ear); "faithful": real transcribed notes
+
+
+def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_piano: bool | None = None,
+            accomp_mode: str | None = None):
     """Return (events, stats) for one difficulty level. Pass `song` to reuse the shared
     structure across levels; keep_piano overrides the level's (experimental) setting."""
     lv = LEVELS[level]
@@ -895,7 +991,10 @@ def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_p
     pb = piano_bars(song) if lv.keep_piano else np.zeros(len(song.bars), bool)
     stats["piano_bars"] = int(pb.sum())
     stats["bars"] = len(song.bars)
-    accomp = accompaniment_part(song, lv, melody, bass, pb, stats)
+    if (accomp_mode or ACCOMP_MODE) == "faithful":
+        accomp = accompaniment_faithful(song, lv, melody, bass, stats)
+    else:
+        accomp = accompaniment_part(song, lv, melody, bass, pb, stats)
     piano = verbatim_piano(song, pb, melody) if pb.any() else empty()
 
     melody = melody.copy()
