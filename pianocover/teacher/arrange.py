@@ -272,6 +272,52 @@ class Song:
             padded = np.pad(self.bar_energy, 1, mode="edge")
             self.bar_energy = np.convolve(padded, k, mode="valid")
 
+        # dynamics: INTENSITY, not volume. Mastered songs are compressed: the mix level rises
+        # only a few dB at a climax (measured: velocity contrast of ~10 between quiet parts
+        # and climaxes when following level alone). A climax is carried by more drums, more
+        # instruments, a higher and harder-sung vocal. Combine those, each as a robust
+        # z-score over the song, smoothed over ~2 s, then scale p5..p95 to 0..1.
+        n = len(db)
+        tt = np.arange(n) * FRAME_HOP
+
+        def smooth(x, k=41):
+            return np.convolve(np.pad(x, k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+
+        def z(x):
+            lo_, hi_ = np.percentile(x, 5), np.percentile(x, 95)
+            return (x - lo_) / max(hi_ - lo_, 1e-6)
+
+        def rate(times, weights=None):
+            h = np.zeros(n)
+            if len(times):
+                np.add.at(h, np.clip((np.asarray(times) / FRAME_HOP).astype(int), 0, n - 1),
+                          1.0 if weights is None else weights)
+            return smooth(h)
+
+        d = np.asarray(a.drum_onsets).reshape(-1, 3)
+        oth = np.asarray(a.other).reshape(-1, 4)
+        voc = np.asarray(a.vocal_f0 if len(a.vocal_f0) else a.vocal).reshape(-1, 4)
+        vheight = np.zeros(n)
+        if len(voc) > 4:
+            p10, p90 = np.percentile(voc[:, 2], 10), np.percentile(voc[:, 2], 90)
+            for s_, e_, p_, _v in voc:
+                vheight[int(s_ / FRAME_HOP):int(e_ / FRAME_HOP) + 1] = np.clip((p_ - p10) / max(p90 - p10, 1), 0, 1.3)
+        vrms = 20 * np.log10(np.asarray(a.vocal_rms, np.float64)[:n] + 1e-5)
+        vrms = np.pad(vrms, (0, n - len(vrms)), mode="edge")
+        comp = [(0.30, z(smooth(db))), (0.25, z(rate(d[:, 0], d[:, 2]))) if len(d) else (0, 0),
+                (0.15, z(rate(oth[:, 0]))) if len(oth) else (0, 0),
+                (0.15, smooth(vheight)), (0.15, z(smooth(vrms)))]
+        x = sum(w * c for w, c in comp) / sum(w for w, c in comp)
+        self._loud = np.clip(z(x), 0, 1)
+        # same curve with headroom: 0 = quiet (p5), 1 = the single most intense moment, so a
+        # long climax keeps rising instead of sitting at the ceiling (p95 scaling saturates
+        # for the loudest 5% of the song; a final chorus is longer than that)
+        lo_ = np.percentile(x, 5)
+        self._peak = np.clip((x - lo_) / max(x.max() - lo_, 1e-6), 0, 1)
+        vdb = 20 * np.log10(np.asarray(a.vocal_rms, np.float64) + 1e-5)
+        v50, v95 = np.percentile(vdb, 50), np.percentile(vdb, 95)
+        self._vocal_push = np.clip((vdb - v50) / max(v95 - v50, 1e-3), 0, 1)  # belted / cried notes
+
         self.key_pcs = self._estimate_key()
 
     def _verify_chords(self, min_agree: float = 0.55, min_weight: float = 0.5) -> int:
@@ -347,6 +393,12 @@ class Song:
 
     def bar_index(self, t: float) -> int:
         return int(np.clip(np.searchsorted(self.bars, t, side="right") - 1, 0, len(self.bars) - 1))
+
+    def loud_at(self, t: float) -> float:
+        return float(self._loud[int(np.clip(t / FRAME_HOP, 0, len(self._loud) - 1))])
+
+    def vocal_push_at(self, t: float) -> float:
+        return float(self._vocal_push[int(np.clip(t / FRAME_HOP, 0, len(self._vocal_push) - 1))])
 
     def energy_at(self, t: float) -> float:
         return float(self.bar_energy[self.bar_index(t)])
@@ -478,8 +530,23 @@ def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
     changes = [c[0] for c in song.chords if c[2] is not None]
     mel = legato(mel, max_gap=min(0.35, song.period), max_len=4 * song.period, barriers=changes)
     mel = drop_short(mel, lv.melody_min_dur)
-    if lv.melody_octaves:
-        loud = np.array([song.energy_at(t) > 0.7 for t in mel[:, START]], bool)
+    # a sung line does not sit well on a piano note for note: fast same-pitch syllables
+    # become one held note (more so at the easier levels)
+    rep = {"easy": 1.0, "simple": 0.75, "normal": 0.5, "full": 0.25}.get(lv.name, 0.0) * song.period
+    if rep > 0 and len(mel) > 1:
+        mel = mel[np.argsort(mel[:, START], kind="stable")]
+        kept = [mel[0].copy()]
+        for row in mel[1:]:
+            p = kept[-1]
+            if row[PITCH] == p[PITCH] and row[START] - p[START] < rep and row[START] - p[END] < 0.12:
+                p[END] = max(p[END], row[END])
+            else:
+                kept.append(row.copy())
+        mel = np.stack(kept)
+    # power: octave-doubled melody where the song is loud (all but the two easiest levels)
+    thr = {"normal": 0.8, "full": 0.7, "virtuoso": 0.6}.get(lv.name)
+    if thr is not None:
+        loud = np.array([song.loud_at(t) > thr for t in mel[:, START]], bool)
         dbl = mel[loud & (mel[:, PITCH] - 12 >= 55)].copy()
         dbl[:, PITCH] -= 12
         mel = np.concatenate([mel, dbl])
@@ -676,7 +743,7 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
                 w[pc] = w.get(pc, 0.0) + o * sal * row[VEL]
             chosen = []
             for pc, _ in sorted(w.items(), key=lambda x: -x[1]):
-                if len(chosen) >= lv.accomp_notes:
+                if len(chosen) >= lv.accomp_notes + (lv.accomp_notes >= 3 and song.loud_at(s) > 0.7):  # fuller at a climax
                     break
                 if any((pc - q) % 12 in (1, 11) for q in chosen):
                     continue  # never voice two pitch classes a semitone apart
@@ -727,7 +794,7 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
         if not voicing:
             continue
         prev = voicing
-        vel = 42 + 30 * e
+        vel = 26 + 76 * song.loud_at(t) ** 1.3
         for p in voicing:
             out.append([t, max(end, t + 0.08), p, vel])
     stats["accomp_hits"] = len(slots)
@@ -793,12 +860,18 @@ def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_p
     accomp = accompaniment_part(song, lv, melody, bass, pb, stats)
     piano = verbatim_piano(song, pb, melody) if pb.any() else empty()
 
-    e_mel = np.array([song.energy_at(t) for t in melody[:, START]]) if len(melody) else np.zeros(0)
     melody = melody.copy()
-    melody[:, VEL] = 62 + 30 * e_mel
+    if len(melody):
+        melody[:, VEL] = [np.clip(46 + 68 * song.loud_at(t) ** 1.3 + 12 * song.vocal_push_at(t), 1, 127)
+                          for t in melody[:, START]]
     bass = bass.copy()
     if len(bass):
-        bass[:, VEL] = 50 + 30 * np.array([song.energy_at(t) for t in bass[:, START]])
+        bl = np.array([song.loud_at(t) for t in bass[:, START]])
+        bass[:, VEL] = 34 + 76 * bl ** 1.3
+        if lv.name in ("normal", "full", "virtuoso"):  # power: bass in octaves where loud
+            octv = bass[(bl > 0.7) & (bass[:, PITCH] - 12 >= 28)].copy()
+            octv[:, PITCH] -= 12
+            bass = np.concatenate([bass, octv])
 
     parts = [melody, bass, accomp, piano]
     stats["chords_replaced"] = song.chords_replaced

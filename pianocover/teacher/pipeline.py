@@ -78,8 +78,8 @@ class TeacherPipeline:
                           min_note_ms=70)
         other = self._step("bp_other", m.basic_pitch, stems["other"], SR, min_note_ms=60, melodia_trick=False)
         other_piano = self._step("transkun_other", m.transcribe_piano, stems["other"])
-        vocal_f0 = self._step("crepe_vocals", m.vocal_melody, stems["vocals"], SR,
-                              onsets=vocal[:, 0] if len(vocal) else None)
+        vocal_f0, vocal_curve, vocal_effort = self._step("crepe_vocals", m.vocal_melody, stems["vocals"], SR,
+                                           onsets=vocal[:, 0] if len(vocal) else None, return_curve=True)
         drums = self._step("drum_onsets", drum_onsets, stems["drums"], SR)
         rms = self._step("rms", lambda: (rms_curve(mono), rms_curve(stems["vocals"]), rms_curve(stems["other"])))
         if save_stems_to is not None:
@@ -91,7 +91,7 @@ class TeacherPipeline:
         return Analysis(
             duration=mix.shape[1] / SR, beats=beats, downbeats=downbeats, chords=chord_spans,
             chord_labels=chord_labels, vocal=vocal, bass=bass, other=other, other_piano=other_piano,
-            drum_onsets=drums, mix_rms=rms[0], vocal_rms=rms[1], other_rms=rms[2], vocal_f0=vocal_f0,
+            drum_onsets=drums, mix_rms=rms[0], vocal_rms=rms[1], other_rms=rms[2], vocal_f0=vocal_f0, vocal_curve=vocal_curve, vocal_effort=vocal_effort,
             meta={"source_audio": str(audio_path), "demucs": "htdemucs", "basic_pitch": m.bp_provider},
         )
 
@@ -187,7 +187,8 @@ def main(argv=None):
 
                         y, sr = sf.read(str(stem), dtype="float32")
                         y = y.mean(1) if y.ndim > 1 else y
-                        a.vocal_f0 = pipe.m.vocal_melody(y, sr, onsets=a.vocal[:, 0] if len(a.vocal) else None)
+                        a.vocal_f0, a.vocal_curve, a.vocal_effort = pipe.m.vocal_melody(
+                            y, sr, onsets=a.vocal[:, 0] if len(a.vocal) else None, return_curve=True)
                         a.save(npz)
             elif args.rearrange:
                 print(f"[{i}/{len(rows)}] {sid}: no cached analysis, skipped", flush=True)

@@ -168,7 +168,7 @@ class TeacherModels:
 
     @torch.inference_mode()
     def vocal_melody(self, mono: np.ndarray, sr: int, onsets=None, hop_sec: float = 0.02,
-                     gate_db: float = 40.0, voiced_threshold: float = 0.3) -> np.ndarray:
+                     gate_db: float = 40.0, voiced_threshold: float = 0.3, return_curve: bool = False):
         """CREPE 'full' f0 on the vocal stem -> sung notes (see f0notes). Only regions where
         the stem is not silent are analysed (saves 30-50% on typical songs).
         Measured on a 3060 Ti: full model, 20 ms hop agrees with 10 ms on 99.9% of frames
@@ -201,7 +201,20 @@ class TeacherModels:
                 midi[a0:a0 + k] = 12 * np.log2(np.maximum(f0[:k], 1e-3) / 440.0) + 69
                 per[a0:a0 + k] = p[:k]
         voiced = (per >= voiced_threshold) & active
-        return f0_to_notes(midi, voiced, hop_sec, level_db=level - level.max(), onsets=onsets)
+        notes = f0_to_notes(midi, voiced, hop_sec, level_db=level - level.max(), onsets=onsets)
+        if not return_curve:
+            return notes
+        # continuous track, 20 ms hop: [f0 in MIDI units (nan = unvoiced), level dB below peak]
+        curve = np.stack([np.where(voiced, midi, np.nan), level - level.max()], axis=1)
+        # vocal effort: share of the energy above 2 kHz, in dB. Belting / pushing makes a voice
+        # brighter far more than louder (stems are compressed), so this carries the "power"
+        import librosa
+
+        S = np.abs(librosa.stft(y, n_fft=1024, hop_length=hop)) ** 2
+        fr = librosa.fft_frequencies(sr=16000, n_fft=1024)
+        effort = 10 * np.log10(S[fr > 2000].sum(0) / (S.sum(0) + 1e-9) + 1e-9)
+        effort = np.pad(effort, (0, max(n_frames - len(effort), 0)), mode="edge")[:n_frames]
+        return notes, curve, effort
 
     @torch.inference_mode()
     def transcribe_piano(self, mono: np.ndarray) -> np.ndarray:

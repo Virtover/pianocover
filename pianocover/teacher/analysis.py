@@ -33,6 +33,10 @@ class Analysis:
     meta: dict = field(default_factory=dict)
     # CREPE f0 -> notes on the vocal stem (preferred melody source; empty in old caches)
     vocal_f0: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))
+    # continuous sung pitch + loudness, 20 ms hop: (F, 2) [f0 as MIDI float or nan, dB below peak]
+    vocal_curve: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
+    # vocal effort, same 20 ms frames: dB share of energy above 2 kHz (brightness of the voice)
+    vocal_effort: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def save(self, path) -> None:
         arrays = {}
@@ -63,6 +67,8 @@ class Analysis:
                 continue
             else:
                 kw[f.name] = np.asarray(z[f.name], dtype=np.float64)
+        if "vocal_curve" in kw:
+            kw["vocal_curve"] = kw["vocal_curve"].reshape(-1, 2)
         if "vocal_f0" in kw:
             kw["vocal_f0"] = kw["vocal_f0"].reshape(-1, 4)
         for name in ("vocal", "bass", "other", "other_piano"):
