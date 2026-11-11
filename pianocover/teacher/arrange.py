@@ -307,6 +307,11 @@ class Song:
         comp = [(0.30, z(smooth(db))), (0.25, z(rate(d[:, 0], d[:, 2]))) if len(d) else (0, 0),
                 (0.15, z(rate(oth[:, 0]))) if len(oth) else (0, 0),
                 (0.15, smooth(vheight)), (0.15, z(smooth(vrms)))]
+        eff = np.asarray(getattr(a, "vocal_effort", np.zeros(0)), np.float64)
+        if len(eff) > 10:  # vocal effort (brightness): the pushed / belted quality, while sung
+            eff50 = np.interp(tt, np.arange(len(eff)) * 0.02, eff)
+            eff50 = np.where(vheight > 0, eff50, np.percentile(eff50, 10))
+            comp.append((0.2, z(smooth(eff50))))
         x = sum(w * c for w, c in comp) / sum(w for w, c in comp)
         self._loud = np.clip(z(x), 0, 1)
         # same curve with headroom: 0 = quiet (p5), 1 = the single most intense moment, so a
@@ -314,6 +319,22 @@ class Song:
         # for the loudest 5% of the song; a final chorus is longer than that)
         lo_ = np.percentile(x, 5)
         self._peak = np.clip((x - lo_) / max(x.max() - lo_, 1e-6), 0, 1)
+        # sections: every bar gets a tier 0 quiet / 1 medium / 2 loud / 3 climax from its
+        # intensity relative to the song range; one-bar blips join their neighbours. The
+        # tier decides the TEXTURE (octaves, chord size, density); bar_dyn the loudness.
+        bp = np.array([self._mean_over(self._peak, s, s + self.bar_len) for s in self.bars])
+        if len(bp) >= 3:
+            bp = np.convolve(np.pad(bp, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
+        q = (bp - bp.min()) / max(bp.max() - bp.min(), 1e-6)
+        # a climax is rare by definition: at most the top quarter of the bars, loud at most ~55%
+        t3 = max(0.82, float(np.quantile(q, 0.75)))
+        t2 = min(max(0.6, float(np.quantile(q, 0.45))), t3 - 0.03)
+        tier = np.digitize(q, [min(0.3, t2 - 0.03), t2, t3])
+        if len(tier) >= 3:
+            pad = np.pad(tier, 1, mode="edge")
+            tier = np.median(np.stack([pad[i:i + len(tier)] for i in range(3)]), axis=0).astype(int)
+        self.bar_tier = tier
+        self.bar_dyn = 0.6 * q + 0.4 * tier / 3.0
         vdb = 20 * np.log10(np.asarray(a.vocal_rms, np.float64) + 1e-5)
         v50, v95 = np.percentile(vdb, 50), np.percentile(vdb, 95)
         self._vocal_push = np.clip((vdb - v50) / max(v95 - v50, 1e-3), 0, 1)  # belted / cried notes
@@ -399,6 +420,22 @@ class Song:
 
     def vocal_push_at(self, t: float) -> float:
         return float(self._vocal_push[int(np.clip(t / FRAME_HOP, 0, len(self._vocal_push) - 1))])
+
+    def tier_at(self, t: float) -> int:
+        return int(self.bar_tier[self.bar_index(t)])
+
+    def dyn_at(self, t: float) -> float:
+        """Loudness 0..1 for a note at t: the bar's level, a crescendo ramp through the bar
+        before a louder section, an accent on the downbeat where a loud section arrives,
+        and a little of the moment-to-moment intensity."""
+        i = self.bar_index(t)
+        d = float(self.bar_dyn[i])
+        frac = float(np.clip((t - self.bars[i]) / self.bar_len, 0, 1))
+        if i + 1 < len(self.bar_dyn) and self.bar_dyn[i + 1] > d + 0.1:
+            d += (self.bar_dyn[i + 1] - d) * frac ** 1.5          # crescendo into the next bar
+        if i > 0 and self.bar_tier[i] > self.bar_tier[i - 1] and self.bar_tier[i] >= 2 and frac < 0.06:
+            d += 0.15                                              # arrival accent
+        return float(np.clip(0.8 * d + 0.2 * self.loud_at(t) * d ** 0.5 + 0.0, 0, 1.1))
 
     def energy_at(self, t: float) -> float:
         return float(self.bar_energy[self.bar_index(t)])
@@ -544,9 +581,9 @@ def melody_part(song: Song, lv: Level, stats: dict) -> np.ndarray:
                 kept.append(row.copy())
         mel = np.stack(kept)
     # power: octave-doubled melody where the song is loud (all but the two easiest levels)
-    thr = {"normal": 0.8, "full": 0.7, "virtuoso": 0.6}.get(lv.name)
+    thr = {"simple": 3, "normal": 3, "full": 2, "virtuoso": 2}.get(lv.name)  # tier from which the melody is in octaves
     if thr is not None:
-        loud = np.array([song.loud_at(t) > thr for t in mel[:, START]], bool)
+        loud = np.array([song.tier_at(t) >= thr for t in mel[:, START]], bool)
         dbl = mel[loud & (mel[:, PITCH] - 12 >= 55)].copy()
         dbl[:, PITCH] -= 12
         mel = np.concatenate([mel, dbl])
@@ -708,7 +745,8 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
     for g in np.unique(group):
         m = group == g
         e_g = float(np.mean([song.bar_energy[b] for b in np.unique(bar_idx[m])]))
-        thr = lv.accomp_threshold * (1.3 - 0.6 * e_g)
+        tier_g = int(max(song.bar_tier[b] for b in np.unique(bar_idx[m])))
+        thr = lv.accomp_threshold * (1.3 - 0.6 * e_g) * (1.4, 1.0, 0.85, 0.7)[tier_g]  # sparse when quiet
         for p in np.unique(pos[m]):
             mp = m & (pos == p)
             pattern[(g, p)] = float(strength[mp].mean()) >= thr
@@ -717,7 +755,7 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
         if skip_bars[bar_idx[i]]:
             continue
         at_change = any(abs(t - cs) < 0.5 * step for cs in chord_starts)
-        at_bar = pos[i] == 0 and song.bar_energy[bar_idx[i]] > 0.3
+        at_bar = pos[i] == 0 and song.bar_tier[bar_idx[i]] >= 1
         if pattern.get((group[i], pos[i]), False) or at_change or at_bar:
             slots.append(t)
     slots = np.array(sorted(set(np.round(slots, 4))))
@@ -743,7 +781,7 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
                 w[pc] = w.get(pc, 0.0) + o * sal * row[VEL]
             chosen = []
             for pc, _ in sorted(w.items(), key=lambda x: -x[1]):
-                if len(chosen) >= lv.accomp_notes + (lv.accomp_notes >= 3 and song.loud_at(s) > 0.7):  # fuller at a climax
+                if len(chosen) >= lv.accomp_notes + (lv.accomp_notes >= 2 and song.tier_at(s) >= 2):  # fuller at a climax
                     break
                 if any((pc - q) % 12 in (1, 11) for q in chosen):
                     continue  # never voice two pitch classes a semitone apart
@@ -794,7 +832,7 @@ def accompaniment_part(song: Song, lv: Level, melody: np.ndarray, bass: np.ndarr
         if not voicing:
             continue
         prev = voicing
-        vel = 26 + 76 * song.loud_at(t) ** 1.3
+        vel = 22 + 88 * min(song.dyn_at(t), 1.0) ** 1.2
         for p in voicing:
             out.append([t, max(end, t + 0.08), p, vel])
     stats["accomp_hits"] = len(slots)
@@ -862,14 +900,15 @@ def arrange(a: Analysis, level: str = "normal", song: Song | None = None, keep_p
 
     melody = melody.copy()
     if len(melody):
-        melody[:, VEL] = [np.clip(46 + 68 * song.loud_at(t) ** 1.3 + 12 * song.vocal_push_at(t), 1, 127)
+        melody[:, VEL] = [np.clip(42 + 74 * song.dyn_at(t) ** 1.2 + 10 * song.vocal_push_at(t), 1, 127)
                           for t in melody[:, START]]
     bass = bass.copy()
     if len(bass):
-        bl = np.array([song.loud_at(t) for t in bass[:, START]])
-        bass[:, VEL] = 34 + 76 * bl ** 1.3
+        bl = np.array([song.dyn_at(t) for t in bass[:, START]])
+        tb = np.array([song.tier_at(t) for t in bass[:, START]])
+        bass[:, VEL] = np.clip(30 + 84 * bl ** 1.2, 1, 127)
         if lv.name in ("normal", "full", "virtuoso"):  # power: bass in octaves where loud
-            octv = bass[(bl > 0.7) & (bass[:, PITCH] - 12 >= 28)].copy()
+            octv = bass[(tb >= 2) & (bass[:, PITCH] - 12 >= 28)].copy()
             octv[:, PITCH] -= 12
             bass = np.concatenate([bass, octv])
 
