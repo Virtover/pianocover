@@ -147,7 +147,7 @@ def power_layer(inst, effort, hop=0.02):
     return layer
 
 
-for path in sorted(glob.glob(os.path.join(root, "analysis", "fma_*.npz"))):
+for path in sorted(glob.glob(os.path.join(root, "analysis", "*.npz"))):
     sid = os.path.basename(path)[:-4]
     a = Analysis.load(path)
     song = Song(a)
