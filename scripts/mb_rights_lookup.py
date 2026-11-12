@@ -101,13 +101,15 @@ def lookup(artist, track):
     hits = find_recordings(artist, track)
     if not hits:
         return {"verdict": "unknown", "why": "no recording"}
-    writers, rec = {}, hits[0]
+    writers, publishers, rec = {}, set(), hits[0]
     for h in hits[:5]:
-        full = get("recording/" + h["id"], inc="work-rels+work-level-rels+artist-rels")
+        full = get("recording/" + h["id"], inc="work-rels+work-level-rels+artist-rels+label-rels")
         for rel in full.get("relations", []):
             for wr in (rel.get("work") or {}).get("relations", []):
                 if wr.get("type") in WRITER_RELS and "artist" in wr:
                     writers[wr["artist"]["id"]] = wr["artist"]["name"]
+                elif wr.get("type") == "publishing" and "label" in wr:
+                    publishers.add(wr["label"]["name"])
         if writers:
             rec = h
             break
@@ -115,7 +117,7 @@ def lookup(artist, track):
     labels = sorted({li["label"]["name"] for r in rels for li in r.get("label-info", []) if li.get("label")})
     labels = [x for x in labels if x != "[no label]"]
     wl = [{"name": n, "country": artist_country(i, n)} for i, n in writers.items()]
-    out = {"mb_recording": rec["id"], "mb_title": rec.get("title"), "writers": wl, "labels": labels}
+    out = {"mb_recording": rec["id"], "mb_title": rec.get("title"), "writers": wl, "labels": labels, "publishers": sorted(publishers)}
     majors = [x for x in labels if MAJOR.search(x)]
     foreign = [w["name"] for w in wl if w["country"] and w["country"] not in OK_COUNTRIES]
     if majors and len(majors) == len(labels):
