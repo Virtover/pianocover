@@ -49,3 +49,57 @@ Not verified: MuseScore's terms on scraping and ML (page returned 403), MusicNet
 Open items:
 - Transkun: an email to the author confirming `2.0.pt` is under the MIT license would close the question.
 - Demucs 4-stem: the weights' license is unstated, and the only stated caveat is about training data (covered by the position above).
+
+## NonCommercial (NC) data: owner's risk decision, 2026-11-11
+
+The license gate accepts NC-licensed data only with an explicit `--allow-noncommercial` flag
+(`import_aligned`, `merge_datasets`, `teacher.pipeline`, `teacher.curate_fma`). NC-SA data
+needs `--allow-sharealike` as well. ND and unknown licenses stay refused. This is the owner's
+decision, based on background research and not on legal advice:
+
+- Polish Copyright Act art. 26(3) (Dz.U. 2024 poz. 1254): reproducing published works for text
+  and data mining is allowed unless the rights holder expressly reserved it (machine-readable
+  for openly accessible works). No commercial-use limit, no mention of AI.
+- Creative Commons FAQ: a CC license applies "only when a particular use would otherwise not
+  be permitted by copyright".
+- Unsettled: whether an NC license is itself such a reservation (no ruling found). The
+  exception is EU / Polish law; US law depends on fair use.
+
+Conditions to follow for every NC source:
+1. Download only from the official source; check its terms and robots.txt for a rights
+   reservation and note the result in the log below.
+2. Check the dataset's own terms for restrictions beyond the CC license.
+3. Do not redistribute the data; keep trained weights on the server.
+4. Delete raw copies when training is finished (art. 26(3) allows keeping them only as long
+   as needed).
+
+Still excluded: unlicensed YouTube-sourced pair lists (rights holders and collecting
+societies have reserved their rights; lawful access is doubtful).
+
+### NC source log
+| Date | Dataset | Official source | License | Reservation check | Used for |
+|---|---|---|---|---|---|
+| (none yet) | | | | | |
+
+## Policy update, 2026-11-12 (owner's decision)
+
+YouTube-sourced audio and covers are allowed when the underlying rights holders have not
+reserved their rights. Sony, Universal and Warner catalogues stay excluded. This replaces the
+"Still excluded: unlicensed YouTube-sourced pair lists" line above for non-reserved content.
+A third-party model's training data is not a blocker; only the license on its code and weights is.
+
+## Ready-made audio -> piano-cover models (checked 2026-11-12)
+
+| Model | Code | Weights | Result |
+|---|---|---|---|
+| AMT-APC (github.com/310hz/amt-apc) | MIT (LICENSE) | `apc.pth` in the repo's GitHub release, no separate statement | Runs: 5-9 s per song, 2.3 GB peak VRAM (measured, 3060 Ti, 10 FMA CC tracks; one track gave 9 notes). Owner listened: quality not good enough. Rejected on quality. |
+| Etude (github.com/Xiugapurin/Etude) | MIT | CC BY-NC-SA 4.0, LICENSE says no commercial use, contact owner | Best published listening score (3.50 vs 3.92 human, Etude paper). Owner judged demos poor. Rejected (license and quality). README asks for 16 GB VRAM (not tested). |
+| PiCoGen2 (tanchihpin0517/PiCoGen, v2 branch) | MIT | CC BY-NC-SA 3.0 (HookTheory-derived), per subagent reading of LICENSE | Rejected (license; scored below Etude). |
+| Pop2Piano (sweetcocoa/pop2piano) | no LICENSE file (GitHub API: none) | HF card has no license field | No license granted; older and weaker than the above. Rejected. |
+
+## Piano corpora checked 2026-11-12
+
+| Dataset | Terms (primary source) | Verdict |
+|---|---|---|
+| Gangqinpu v1.0.0 (github.com/wei-zeng98/gangqinpu, HF Wayne42/gangqinpu): 18,786 piano score-performance pairs, 1,007 h | CC BY-NC-SA 4.0; the HF page requires accepting the license and confirming non-commercial use before download | Blocked by the gate: downloading needs a non-commercial-use confirmation. Piano only, no band audio. |
+| PIAST (github.com/Hayeonbang/PIAST): 9,673 piano tracks, YouTube IDs + transcribed MIDI + text | README: CC BY-NC 4.0 (badge says MIT) | Usable under the NC decision as a piano-only prior. Not paired with band audio. |

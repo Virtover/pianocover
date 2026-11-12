@@ -37,6 +37,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--licensed-only", action="store_true")
     ap.add_argument("--allow-sharealike", action="store_true")
+    ap.add_argument("--allow-noncommercial", action="store_true")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -49,7 +50,7 @@ def main(argv=None):
     if args.licensed_only:
         for name in splits:
             before = len(splits[name])
-            splits[name] = [it for it in splits[name] if license_ok(it["license"], args.allow_sharealike)[0]]
+            splits[name] = [it for it in splits[name] if license_ok(it["license"], args.allow_sharealike, args.allow_noncommercial)[0]]
             print(f"{name}: dropped {before - len(splits[name])} items without a usable license")
 
     # a song must not appear in both splits, even when it came from different sources

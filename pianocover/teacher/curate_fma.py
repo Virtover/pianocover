@@ -118,7 +118,7 @@ class HTTPRangeFile(io.RawIOBase):
         return len(data)
 
 
-def select_tracks(meta_dir: Path, genres, min_dur, max_dur, allow_sa, limit, order, seed):
+def select_tracks(meta_dir: Path, genres, min_dur, max_dur, allow_sa, limit, order, seed, allow_nc=False):
     import pandas as pd
 
     from ..import_aligned import license_ok
@@ -135,7 +135,7 @@ def select_tracks(meta_dir: Path, genres, min_dur, max_dur, allow_sa, limit, ord
         "license_title": tracks[("track", "license")],
     }).join(raw[["license_url", "track_url", "artist_url"]], how="left")
     df["license"] = df["license_url"].fillna("").map(canonical_license)
-    verdict = df["license"].map(lambda s: license_ok(s, allow_sa))
+    verdict = df["license"].map(lambda s: license_ok(s, allow_sa, allow_nc))
     df["license_ok"] = verdict.map(lambda v: v[0])
     stats = {"tracks": len(df), "license_ok": int(df["license_ok"].sum())}
     df = df[df["license_ok"]]
@@ -173,6 +173,8 @@ def main(argv=None):
     ap.add_argument("--min-dur", type=float, default=90)
     ap.add_argument("--max-dur", type=float, default=420)
     ap.add_argument("--allow-sharealike", action="store_true")
+    ap.add_argument("--allow-noncommercial", action="store_true",
+                    help="also keep NC tracks (risk decision; see docs/MODEL_LICENSES.md); ND stays excluded")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--order", choices=["listens", "random"], default="listens")
     ap.add_argument("--seed", type=int, default=0)
@@ -184,7 +186,7 @@ def main(argv=None):
     (out / "audio").mkdir(parents=True, exist_ok=True)
     genres = [g.strip() for g in args.genres.split(",") if g.strip()]
     df, stats = select_tracks(Path(args.meta), genres, args.min_dur, args.max_dur, args.allow_sharealike,
-                              args.limit, args.order, args.seed)
+                              args.limit, args.order, args.seed, allow_nc=args.allow_noncommercial)
     print(f"{stats['tracks']} tracks, {stats['license_ok']} pass the license gate, "
           f"{stats['after_filters']} after genre/duration filters; selected {len(df)}", flush=True)
 

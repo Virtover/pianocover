@@ -130,6 +130,8 @@ def main(argv=None):
     ap.add_argument("--refresh-melody", action="store_true",
                     help="recompute only the CREPE vocal melody of cached analyses from saved stems")
     ap.add_argument("--save-stems", action="store_true")
+    ap.add_argument("--allow-sharealike", action="store_true")
+    ap.add_argument("--allow-noncommercial", action="store_true", help="see docs/MODEL_LICENSES.md")
     ap.add_argument("--texture", choices=["reduction", "piano"], default="reduction",
                     help="reduction: band rhythms copied; piano: song's notes laid out as piano figures "
                          "(files get a _piano suffix)")
@@ -155,7 +157,7 @@ def main(argv=None):
     manifest, report = [], []
     for i, r in enumerate(rows, 1):
         sid = r["id"]
-        ok, why = license_ok(r.get("license", ""))
+        ok, why = license_ok(r.get("license", ""), args.allow_sharealike, args.allow_noncommercial)
         if not ok:
             print(f"[{i}/{len(rows)}] {sid}: skipped, license refused ({why})", flush=True)
             continue

@@ -13,7 +13,9 @@ Manifest CSV (paths relative to the manifest file):
 
 Licenses accepted by default: CC0, CC-BY (any version), public-domain, owned,
 work-for-hire, ace-step. Anything with NC or ND is always refused; ShareAlike (SA) is
-refused unless --allow-sharealike. Unrecognised strings are refused, so every training
+refused unless --allow-sharealike. NonCommercial (NC) data is refused unless
+--allow-noncommercial: an owner's risk decision of 2026-11-11 that relies on the text-and-data-mining
+exception (Polish Copyright Act art. 26(3)); conditions are in docs/MODEL_LICENSES.md. ND stays refused. Unrecognised strings are refused, so every training
 pair has a recorded, commercially usable license.
 
 Output (in --out): train.pkl, val.pkl, style_stats.json, import_report.csv,
@@ -41,14 +43,16 @@ from . import style as style_mod
 ALLOWED_EXACT = {"cc0", "public-domain", "pd", "owned", "work-for-hire", "commissioned", "ace-step"}
 
 
-def license_ok(text: str, allow_sharealike: bool = False) -> tuple[bool, str]:
+def license_ok(text: str, allow_sharealike: bool = False, allow_noncommercial: bool = False) -> tuple[bool, str]:
     """Return (accepted, reason) for a license string such as 'CC-BY-4.0' or 'CC BY-NC 3.0'."""
     t = (text or "").strip().lower().replace("_", "-").replace(" ", "-")
     if not t or t in {"unknown", "none", "n/a"}:
         return False, "no license recorded"
     parts = set(re.split(r"[-/]+", t))
     if "nc" in parts or "noncommercial" in parts or "non-commercial" in t:
-        return False, "non-commercial"
+        if not allow_noncommercial:
+            return False, "non-commercial (pass --allow-noncommercial to accept; see docs/MODEL_LICENSES.md)"
+        t = "cc-by" + t.split("cc-by", 1)[1] if "cc-by" in t else "cc-by"  # judged like CC BY below
     if "nd" in parts or "noderivatives" in parts or "noderivs" in parts:
         return False, "no-derivatives (a piano cover is an adaptation)"
     if t in ALLOWED_EXACT:
@@ -157,6 +161,8 @@ def main(argv=None):
     ap.add_argument("--val-fraction", type=float, default=0.03)
     ap.add_argument("--min-notes", type=int, default=50)
     ap.add_argument("--allow-sharealike", action="store_true")
+    ap.add_argument("--allow-noncommercial", action="store_true",
+                    help="accept NC-licensed data (risk decision; see docs/MODEL_LICENSES.md)")
     args = ap.parse_args(argv)
 
     manifest = Path(args.manifest)
@@ -172,7 +178,7 @@ def main(argv=None):
 
     refused, jobs = [], []
     for r in rows:
-        ok, why = license_ok(r["license"], args.allow_sharealike)
+        ok, why = license_ok(r["license"], args.allow_sharealike, args.allow_noncommercial)
         if ok:
             jobs.append((r, base, out, args.min_notes))
         else:

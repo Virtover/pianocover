@@ -200,6 +200,12 @@ def test_license_gate():
         assert not license_ok(lic)[0], lic
     assert license_ok("CC-BY-SA-4.0", allow_sharealike=True)[0]
     assert not license_ok("CC-BY-NC-SA-4.0", allow_sharealike=True)[0]
+    # NC is accepted only with the explicit flag; NC-SA needs both flags; ND is never accepted
+    assert license_ok("CC-BY-NC-4.0", allow_noncommercial=True)[0]
+    assert not license_ok("CC-BY-NC-SA-4.0", allow_noncommercial=True)[0]
+    assert license_ok("CC-BY-NC-SA-4.0", allow_sharealike=True, allow_noncommercial=True)[0]
+    assert not license_ok("CC-BY-NC-ND-4.0", allow_sharealike=True, allow_noncommercial=True)[0]
+    assert not license_ok("unknown", allow_sharealike=True, allow_noncommercial=True)[0]
 
 
 def test_pedal_intervals():
