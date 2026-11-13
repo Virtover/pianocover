@@ -145,9 +145,18 @@ def main():
     rows = [line.rstrip("\n").split("\t") for line in open(a.songs, encoding="utf8")]
     rows = [r for r in rows if len(r) >= 5 and r[0] not in done]
     print(f"{len(done)} done, {len(rows)} to look up", flush=True)
+    fails = 0
     with out.open("a", encoding="utf8") as f:
         for n, (vid, artist, track, country, kind, *_) in enumerate(rows, 1):
-            res = lookup(artist, track)
+            try:
+                res = lookup(artist, track)
+                fails = 0
+            except RuntimeError as e:  # leave the song out so a rerun retries it; stop if the site is down
+                fails += 1
+                print("skipped:", vid, e, flush=True)
+                if fails >= 10:
+                    raise
+                continue
             f.write(json.dumps({"id": vid, "artist": artist, "track": track, "country": country, **res}, ensure_ascii=False) + "\n")
             f.flush()
             if n % 100 == 0:

@@ -103,3 +103,21 @@ A third-party model's training data is not a blocker; only the license on its co
 |---|---|---|
 | Gangqinpu v1.0.0 (github.com/wei-zeng98/gangqinpu, HF Wayne42/gangqinpu): 18,786 piano score-performance pairs, 1,007 h | CC BY-NC-SA 4.0; the HF page requires accepting the license and confirming non-commercial use before download | Blocked by the gate: downloading needs a non-commercial-use confirmation. Piano only, no band audio. |
 | PIAST (github.com/Hayeonbang/PIAST): 9,673 piano tracks, YouTube IDs + transcribed MIDI + text | README: CC BY-NC 4.0 (badge says MIT) | Usable under the NC decision as a piano-only prior. Not paired with band audio. |
+
+Added 2026-11-13: hFT-Transformer checkpoints are CC BY-NC-SA 4.0 (github.com/sony/hFT-Transformer README, "License"). AMT-APC's `apc.pth` is fine-tuned from an hFT-Transformer checkpoint, so the MIT label on the AMT-APC repo does not settle the weights' license. Retraining the AMT-APC recipe would need a base whose weights are not NC.
+
+## Pop2Piano pair list: rights filter (2026-11-12/13)
+
+Rule (owner's decision): exclude a song if its recording is released or distributed by Sony,
+Universal or Warner, any writer is published by Sony Music Publishing, UMPG or Warner Chappell,
+or any writer belongs to SACEM, GEMA, STIM or ZAiKS (published opt-outs, seen in press coverage).
+Data: `data/meta/` (not in git). Titles via YouTube oEmbed (`scripts/probe_pair_metadata.py`).
+
+- Korean songs (2,138): writers and labels from genie.co.kr (`scripts/genie_rights_lookup.py`).
+  Latin-script writer names were classed Korean / not / unsure by an LLM pass (rough).
+  Result: 996 keep (1,534 pairs), 447 exclude, 284 writer not recognised, 386 unresolved,
+  25 distributed by a major. File: `p2p_rights_kr_final.jsonl`.
+- Japanese/Chinese songs (125): MusicBrainz, mostly unresolved (8 keep).
+- Western songs (1,385): MusicBrainz (`scripts/mb_rights_lookup.py`) plus an LLM check of the
+  196 survivors, since MusicBrainz often lists only compilation labels. 4 keep.
+- 3 of 30 sampled covers were private, blocked or removed; expect further loss when downloading.

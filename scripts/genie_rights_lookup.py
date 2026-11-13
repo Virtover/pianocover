@@ -79,7 +79,7 @@ def lookup(artist, track, asian, yt_title=""):
     sids = []
     cleaned = clean_title(yt_title)
     hangul = " ".join(w for w in cleaned.split() if HANGUL.search(w))  # extracted titles are often translations
-    for q in (f"{artist} {track}", hangul, cleaned):
+    for q in (f"{artist} {track}".replace("%", " "), hangul, cleaned):  # Genie returns an error page for "%"
         if q:
             sids = list(dict.fromkeys(re.findall(r'songid="(\d+)"', fetch("search/searchSong", query=q))))[:3]
         if sids:
@@ -146,9 +146,18 @@ def main():
     rows = [line.rstrip("\n").split("\t") for line in open(a.songs, encoding="utf8")]
     rows = [r for r in rows if len(r) >= 5 and r[3] == a.country and r[0] not in done]
     print(f"{len(done)} done, {len(rows)} to look up", flush=True)
+    fails = 0
     with out.open("a", encoding="utf8") as f:
         for n, (vid, artist, track, country, kind, *_) in enumerate(rows, 1):
-            res = lookup(artist, track, asian, titles.get(vid, ""))
+            try:
+                res = lookup(artist, track, asian, titles.get(vid, ""))
+                fails = 0
+            except RuntimeError as e:  # leave the song out so a rerun retries it; stop if the site is down
+                fails += 1
+                print("skipped:", vid, e, flush=True)
+                if fails >= 10:
+                    raise
+                continue
             f.write(json.dumps({"id": vid, "artist": artist, "track": track, **res}, ensure_ascii=False) + "\n")
             f.flush()
             if n % 100 == 0:
