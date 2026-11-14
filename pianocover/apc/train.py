@@ -1,7 +1,7 @@
 """Fine-tune AMT-APC on prepared cover pairs (see pianocover.apc.prepare).
 
   python -m pianocover.apc.train --ds /data/ds --init /data/ext/amt-apc/models/params/apc.pth \
-      --out /data/runs/apc1 --batch 4 --steps 40000
+      --out /data/runs/apc1 --steps 40000
 
 Speed: bf16 autocast, SDPA attention (model.py), torch.compile, fused AdamW, TF32, a
 sync-free loss, mmap'd float16 spectrograms, labels built in DataLoader workers, pinned
@@ -66,8 +66,8 @@ def main(argv=None):
     ap.add_argument("--ds", required=True, help="dataset dir containing apc/ (from pianocover.apc.prepare)")
     ap.add_argument("--init", required=True, help="apc.pth (warm start) or amt.pth (style gate starts fresh)")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--batch", type=int, default=4)
-    ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps")
+    ap.add_argument("--batch", type=int, default=1, help="one window already fills the GPU (512 frames x 256 bins)")
+    ap.add_argument("--accum", type=int, default=4, help="gradient accumulation; batch 1 x 4 = AMT-APC's batch 4")
     ap.add_argument("--steps", type=int, default=40000, help="optimizer steps")
     ap.add_argument("--lr", type=float, default=5e-5, help="AMT-APC used 1e-4 from amt.pth; lower for apc.pth")
     ap.add_argument("--warmup", type=int, default=500)
@@ -83,9 +83,13 @@ def main(argv=None):
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--bench", type=int, default=0, help="time N steps (after warm-up) and exit")
+    ap.add_argument("--vram-fraction", type=float, default=0.92,
+                    help="cap this process's GPU memory (an OOM error instead of spilling into system RAM, "
+                         "which on Windows is ~50x slower and can crash WSL); lower it to keep headroom")
     args = ap.parse_args(argv)
 
     device = torch.device("cuda")
+    torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True

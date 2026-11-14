@@ -26,8 +26,14 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
+    ap.add_argument("--vram-fraction", type=float, default=0.5,
+                    help="cap GPU memory so the machine stays usable while the dataset is built")
     ap.add_argument("--midi", action="store_true", help="also write .mid files")
     args = ap.parse_args(argv)
+    if str(args.device).startswith("cuda"):
+        import torch as _torch
+
+        _torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
     data = Path(args.data)
     out_dir = data / "cover_events"

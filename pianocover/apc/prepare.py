@@ -40,8 +40,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ds", required=True, help="directory with train.pkl / val.pkl from build_dataset")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--vram-fraction", type=float, default=0.5,
+                    help="cap GPU memory so the machine stays usable while the dataset is built")
     ap.add_argument("--min-notes", type=int, default=200)
     args = ap.parse_args(argv)
+    if str(args.device).startswith("cuda"):
+        import torch as _torch
+
+        _torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
     ds = Path(args.ds)
     out = ds / "apc"

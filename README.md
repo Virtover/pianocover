@@ -182,20 +182,52 @@ use `--chunk-sec 12`.
 **Rough budget.** These figures are estimates, not measurements:
 - A full 60k-step stage 1 takes a few days on a 5070. Do a smoke test first with
   `--steps 500 --val-every 250`.
-- Disk: about 21 MB of 44.1 kHz mono WAV per 4-minute song.
+- Disk: about 21 MB of 44.1 kHz mono WAV per 4-minute song (4.7 MB with the default compressed downloads).
 
-## Research-only web data
+## Web pairs and the AMT-APC backend
 
-These steps are for experiments only, not for a product you sell:
+The pair lists in `pairs/` passed the rights and content filters described in
+docs/MODEL_LICENSES.md (2026-11-12 to 11-14):
+
+| List | Pairs | Songs |
+|---|---|---|
+| `pairs/p2p_filtered.csv` | 890 | 590 |
+| `pairs/extra_covers.csv` | 1,938 | the same 590 |
+| `pairs/worship.csv` | 251 | 97 |
+
+The current plan fine-tunes AMT-APC (`apc.pth`, MIT) on them rather than Transkun:
 
 ```bash
-python -m pianocover.download pairs/pop2piano_train_dataset.csv pairs/amtapc_src.json --out /data/raw
-python -m pianocover.transcribe_covers --data /data/raw
-python -m pianocover.build_dataset --data /data/raw --out /data/ds_web
+python -m pianocover.download pairs/p2p_filtered.csv pairs/extra_covers.csv pairs/worship.csv --out /data/raw
+python -m pianocover.transcribe_covers --data /data/raw          # Transkun, ~19x real time on a 3060 Ti
+python -m pianocover.build_dataset --data /data/raw --out /data/ds
+python -m pianocover.apc.prepare --ds /data/ds                   # log-mel spectrograms + style vectors
+python -m pianocover.apc.train --ds /data/ds --init /data/ext/amt-apc/models/params/apc.pth --out /data/runs/apc1
 ```
 
-These items are tagged `license=unknown`, so `merge_datasets --licensed-only` always drops
-them. `scripts/run_all.sh` runs this web flow end to end.
+- **Downloads** keep YouTube's compressed audio (about 4.7 MB per song; `--format wav` gives
+  WAV instead). Two parallel downloads with a pause each, to avoid rate limiting.
+- **VRAM caps:** `transcribe_covers` and `apc.prepare` default to `--vram-fraction 0.5` so the
+  machine stays usable; `apc.train` defaults to 0.92. A cap makes CUDA fail with an OOM error
+  instead of spilling into system RAM, which on Windows was about 50x slower and crashed WSL.
+- **Training speed, measured on the 3060 Ti** (8 GB, 400-step run on 7 pairs):
+
+  | Setting | Throughput | Peak VRAM |
+  |---|---|---|
+  | default: batch 1, accum 4, bf16, compiled | 4.7 windows/s (38 s of audio per s) | 6.1 GiB |
+  | `--freeze-encoder` | 7.6 windows/s | 3.3 GiB |
+  | not compiled | 0.38 windows/s | 7.7 GiB |
+  | fp32, not compiled (close to AMT-APC's own trainer) | 0.05 windows/s (spilled to RAM) | 10.5 GiB |
+
+  One window (8.2 s) already fills the GPU, so a larger batch is not faster; batch 2 needs
+  12 GiB. Estimate for the full set (about 180 h of aligned audio, about 80k windows per epoch):
+  about 5 h per epoch on the 3060 Ti; the 5070 should be faster (not measured).
+- `--bench 30` times a configuration and exits. `pianocover.apc.model` loads `apc.pth`
+  strictly and reproduces AMT-APC's outputs (max difference 2e-5 in fp32); saved checkpoints
+  keep the `apc.pth` layout, so the transcription server can load them as they are.
+
+`build_dataset` tags web pairs `license=unknown`, so `merge_datasets --licensed-only` drops
+them; train on `/data/ds` directly instead.
 
 ## Use it from the transcription server
 
