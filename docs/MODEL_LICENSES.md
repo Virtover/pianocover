@@ -92,7 +92,7 @@ A third-party model's training data is not a blocker; only the license on its co
 
 | Model | Code | Weights | Result |
 |---|---|---|---|
-| AMT-APC (github.com/310hz/amt-apc) | MIT (LICENSE) | `apc.pth` in the repo's GitHub release, no separate statement | Runs: 5-9 s per song, 2.3 GB peak VRAM (measured, 3060 Ti, 10 FMA CC tracks; one track gave 9 notes). Owner listened: quality not good enough. Rejected on quality. |
+| AMT-APC (github.com/310hz/amt-apc) | MIT (LICENSE) | `apc.pth` / `amt.pth` in the repo's 2024-09-22 release, MIT (base hFT checkpoint was MIT then, see below) | Runs: 5-9 s per song, 2.3 GB peak VRAM (measured, 3060 Ti, 10 FMA CC tracks; one track gave 9 notes). Owner listened: quality not good enough. Rejected on quality. |
 | Etude (github.com/Xiugapurin/Etude) | MIT | CC BY-NC-SA 4.0, LICENSE says no commercial use, contact owner | Best published listening score (3.50 vs 3.92 human, Etude paper). Owner judged demos poor. Rejected (license and quality). README asks for 16 GB VRAM (not tested). |
 | PiCoGen2 (tanchihpin0517/PiCoGen, v2 branch) | MIT | CC BY-NC-SA 3.0 (HookTheory-derived), per subagent reading of LICENSE | Rejected (license; scored below Etude). |
 | Pop2Piano (sweetcocoa/pop2piano) | no LICENSE file (GitHub API: none) | HF card has no license field | No license granted; older and weaker than the above. Rejected. |
@@ -104,7 +104,7 @@ A third-party model's training data is not a blocker; only the license on its co
 | Gangqinpu v1.0.0 (github.com/wei-zeng98/gangqinpu, HF Wayne42/gangqinpu): 18,786 piano score-performance pairs, 1,007 h | CC BY-NC-SA 4.0; the HF page requires accepting the license and confirming non-commercial use before download | Blocked by the gate: downloading needs a non-commercial-use confirmation. Piano only, no band audio. |
 | PIAST (github.com/Hayeonbang/PIAST): 9,673 piano tracks, YouTube IDs + transcribed MIDI + text | README: CC BY-NC 4.0 (badge says MIT) | Usable under the NC decision as a piano-only prior. Not paired with band audio. |
 
-Added 2026-11-13: hFT-Transformer checkpoints are CC BY-NC-SA 4.0 (github.com/sony/hFT-Transformer README, "License"). AMT-APC's `apc.pth` is fine-tuned from an hFT-Transformer checkpoint, so the MIT label on the AMT-APC repo does not settle the weights' license. Retraining the AMT-APC recipe would need a base whose weights are not NC.
+Corrected 2026-11-14: Sony's hFT-Transformer repo was MIT-only (one `LICENSE`, commit 0ec4063, 2023-07-10) until commit 226992b (2026-10-28) added `LICENSE-CHECKPOINTS.md` (CC BY-NC-SA 4.0). AMT-APC published `amt.pth` and `apc.pth` on 2024-09-22 (github.com/310hz/amt-apc release "beta") under its MIT license, i.e. derived from checkpoints that were MIT at the time. Use AMT-APC's released files; do not download Sony's checkpoint again (a copy fetched now comes with the NC-SA terms).
 
 ## Pop2Piano pair list: rights filter (2026-11-12/13)
 
