@@ -55,7 +55,13 @@ def main(argv=None):
             continue
         dur = len(y) / SAMPLE_RATE
         x = torch.from_numpy(y[:, None]).to(args.device)
-        notes = model.transcribe(x, discardSecondHalf=False)
+        try:
+            notes = model.transcribe(x, discardSecondHalf=False)
+        except torch.cuda.OutOfMemoryError:
+            del x
+            torch.cuda.empty_cache()
+            print(f"skip {wav.name}: out of GPU memory under the --vram-fraction cap", flush=True)
+            continue
         ev = events.sanitize(events.from_transkun_notes(notes))
         tmp = out_dir / f"{wav.stem}.tmp.npy"
         events.save_npy(tmp, ev)
