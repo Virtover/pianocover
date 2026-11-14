@@ -121,3 +121,13 @@ Data: `data/meta/` (not in git). Titles via YouTube oEmbed (`scripts/probe_pair_
 - Western songs (1,385): MusicBrainz (`scripts/mb_rights_lookup.py`) plus an LLM check of the
   196 survivors, since MusicBrainz often lists only compilation labels. 4 keep.
 - 3 of 30 sampled covers were private, blocked or removed; expect further loss when downloading.
+
+## Content filter (owner's decision, 2026-11-14)
+
+Not a license rule. Dropped: K-pop idol acts (per artist), and songs whose lyrics or title are
+demonic or occult (devils, Satan, witchcraft, shamanic rites, spirit invocation, curses), or that
+glorify or immerse the listener in ghosts, goblins, gumiho or zombies. Kept: supernatural themes
+used only as a backdrop, e.g. love songs from the Goblin or Hotel Del Luna soundtracks, and
+"feels like hell" as a metaphor. Lyrics come from melon.com (`scripts/lyrics_scan.py`, keyword
+hits reviewed by hand). Dropped so far: 안예은 - 창귀, 창모 - METEOR, and one cover from a
+channel named "PIANO마녀".
