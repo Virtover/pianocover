@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from . import SAMPLE_RATE, events
-from .audio import read_wav_slice, wav_info
+from .audio import decode, list_audio
 from .model import load_pretrained_transkun
 
 
@@ -32,7 +32,7 @@ def main(argv=None):
     data = Path(args.data)
     out_dir = data / "cover_events"
     out_dir.mkdir(parents=True, exist_ok=True)
-    wavs = sorted((data / "cover").glob("*.wav"))
+    wavs = list_audio(data / "cover")
     wavs = [w for i, w in enumerate(wavs) if i % args.num_shards == args.shard]
     todo = [w for w in wavs if not (out_dir / f"{w.stem}.npy").exists()]
     print(f"{len(todo)} of {len(wavs)} covers to transcribe on {args.device}", flush=True)
@@ -41,12 +41,14 @@ def main(argv=None):
     torch.set_grad_enabled(False)
     t_audio = t_wall = 0.0
     for i, wav in enumerate(todo, 1):
-        fs, dur = wav_info(wav)
-        if fs != SAMPLE_RATE:
-            print(f"skip {wav.name}: sample rate {fs} != {SAMPLE_RATE}")
-            continue
         t0 = time.time()
-        x = torch.from_numpy(read_wav_slice(wav, 0.0, dur)).to(args.device)
+        try:
+            y = decode(wav, SAMPLE_RATE)
+        except RuntimeError as e:
+            print(f"skip {wav.name}: {e}", flush=True)
+            continue
+        dur = len(y) / SAMPLE_RATE
+        x = torch.from_numpy(y[:, None]).to(args.device)
         notes = model.transcribe(x, discardSecondHalf=False)
         ev = events.sanitize(events.from_transkun_notes(notes))
         tmp = out_dir / f"{wav.stem}.tmp.npy"

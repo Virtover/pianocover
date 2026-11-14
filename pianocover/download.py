@@ -1,12 +1,16 @@
-"""Download pop / piano-cover pairs from YouTube and convert them to 44.1 kHz mono WAV.
+"""Download pop / piano-cover pairs from YouTube.
+
+By default the audio is kept as YouTube serves it (opus/webm or m4a, about 4 MB per song);
+later steps decode it with ffmpeg. `--format wav` converts to 44.1 kHz mono WAV instead
+(about 20 MB per song), which Transkun training reads faster.
 
 Accepted pair lists:
   * CSV with columns `piano_ids,pop_ids` (Pop2Piano's train_dataset.csv, Etude's assets/dataset.csv)
   * AMT-APC's dataset/src.json: {"title": {"original": id, "pianos": [id, ...]}}
 
 Output layout:
-  <out>/pop/<pop_id>.wav
-  <out>/cover/<piano_id>.wav
+  <out>/pop/<pop_id>.<ext>
+  <out>/cover/<piano_id>.<ext>
   <out>/pairs.csv            (pop_id,piano_id of pairs whose audio both exist)
   <out>/download_failures.txt
 
@@ -20,13 +24,16 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import SAMPLE_RATE
+from .audio import AUDIO_EXTS, find_audio
 
 
 def read_pairs(path: str) -> list[tuple[str, str]]:
@@ -56,11 +63,14 @@ def read_pairs(path: str) -> list[tuple[str, str]]:
     return out
 
 
-def fetch_wav(video_id: str, dst: Path, max_minutes: float, cookies: str | None) -> str | None:
-    """Download one video's audio to `dst` (mono, 44.1 kHz, 16-bit). Returns an error string or None."""
-    if dst.exists() and dst.stat().st_size > 1000:
+def fetch_audio(video_id: str, dst_dir: Path, fmt: str, max_minutes: float, cookies: str | None) -> str | None:
+    """Download one video's audio into `dst_dir/<video_id>.<ext>`. Returns an error string or None.
+
+    fmt "native" keeps the downloaded stream; "wav" converts to mono 44.1 kHz 16-bit WAV.
+    """
+    if find_audio(dst_dir, video_id) is not None:
         return None
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [
             sys.executable, "-m", "yt_dlp", "-q", "--no-warnings", "--no-playlist",
@@ -72,17 +82,24 @@ def fetch_wav(video_id: str, dst: Path, max_minutes: float, cookies: str | None)
         if cookies:
             cmd[3:3] = ["--cookies", cookies]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        files = list(Path(tmp).glob("audio.*"))
+        files = [f for f in Path(tmp).glob("audio.*") if ".part" not in f.name]
         if r.returncode != 0 or not files:
             return (r.stderr or "no file (filtered by duration?)").strip().splitlines()[-1][:300]
-        part = dst.with_suffix(".part.wav")
+        src = files[0]
+        if fmt == "native":
+            ext = src.suffix.lower() if src.suffix.lower() in AUDIO_EXTS else ".mka"
+            part = dst_dir / f"{video_id}.part{ext}"
+            shutil.move(str(src), part)
+            part.replace(dst_dir / f"{video_id}{ext}")
+            return None
+        part = dst_dir / f"{video_id}.part.wav"
         r = subprocess.run(
-            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(files[0]),
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
              "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(part)],
             capture_output=True, text=True)
         if r.returncode != 0:
             return ("ffmpeg: " + r.stderr.strip())[:300]
-        part.replace(dst)
+        part.replace(dst_dir / f"{video_id}.wav")
     return None
 
 
@@ -90,10 +107,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pairs", nargs="+", help="one or more CSV (piano_ids,pop_ids) / AMT-APC src.json files")
     ap.add_argument("--out", required=True, help="output directory")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=2, help="parallel downloads (more gets rate limited)")
     ap.add_argument("--limit", type=int, default=0, help="only the first N pairs (0 = all)")
     ap.add_argument("--max-minutes", type=float, default=10.0, help="skip videos longer than this")
     ap.add_argument("--cookies", help="optional cookies.txt for yt-dlp")
+    ap.add_argument("--format", choices=("native", "wav"), default="native",
+                    help="keep the downloaded audio stream (default) or convert to WAV")
+    ap.add_argument("--sleep", type=float, default=1.0,
+                    help="pause per download and worker, to stay under YouTube's rate limits")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -107,14 +128,18 @@ def main(argv=None):
         pairs = pairs[: args.limit]
     jobs = {}
     for pop, piano in pairs:
-        jobs.setdefault(("pop", pop), out / "pop" / f"{pop}.wav")
-        jobs.setdefault(("cover", piano), out / "cover" / f"{piano}.wav")
+        jobs.setdefault(("pop", pop), out / "pop")
+        jobs.setdefault(("cover", piano), out / "cover")
     print(f"{len(pairs)} pairs -> {len(jobs)} unique videos", flush=True)
 
     failures = {}
     with ThreadPoolExecutor(args.workers) as pool:
-        futs = {pool.submit(fetch_wav, vid, dst, args.max_minutes, args.cookies): (kind, vid)
-                for (kind, vid), dst in jobs.items()}
+        def job(vid, dst):
+            err = fetch_audio(vid, dst, args.format, args.max_minutes, args.cookies)
+            time.sleep(args.sleep)
+            return err
+
+        futs = {pool.submit(job, vid, dst): (kind, vid) for (kind, vid), dst in jobs.items()}
         for i, fut in enumerate(as_completed(futs), 1):
             key = futs[fut]
             err = fut.result()

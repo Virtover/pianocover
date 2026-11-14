@@ -25,27 +25,25 @@ import numpy as np
 from . import events
 from . import style as style_mod
 from .align import SYNC_SR, align
+from .audio import decode, find_audio
 
 ARGS = None
 
 
 def _load_sync_audio(path):
-    import librosa
-
-    y, _ = librosa.load(str(path), sr=SYNC_SR, mono=True)
-    return y.astype(np.float32)
+    return decode(path, SYNC_SR)
 
 
 def process_pair(item):
     pop_id, piano_id = item
     a = ARGS
     data = Path(a.data)
-    pop_wav = data / "pop" / f"{pop_id}.wav"
-    cover_wav = data / "cover" / f"{piano_id}.wav"
+    pop_wav = find_audio(data / "pop", pop_id)
+    cover_wav = find_audio(data / "cover", piano_id)
     ev_path = data / "cover_events" / f"{piano_id}.npy"
     base = {"pop_id": pop_id, "piano_id": piano_id}
     try:
-        if not (pop_wav.exists() and cover_wav.exists() and ev_path.exists()):
+        if not (pop_wav and cover_wav and ev_path.exists()):
             return {**base, "status": "missing_files"}
         ev = events.load_npy(ev_path)
         n_notes = int((ev[:, events.PITCH] > 0).sum())
@@ -81,7 +79,7 @@ def process_pair(item):
             # pairs downloaded from the web carry no usable license; merge --licensed-only drops them
             "source": "web",
             "license": "unknown",
-            "audio": str(Path("pop") / f"{pop_id}.wav"),
+            "audio": str(Path("pop") / pop_wav.name),
             "duration": float(duration),
             "events": ev.astype(np.float32),
             "bad_regions": bad,
