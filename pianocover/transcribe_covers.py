@@ -48,15 +48,8 @@ def main(argv=None):
     torch.set_grad_enabled(False)
     t_audio = t_wall = 0.0
     for i, wav in enumerate(todo, 1):
-        # several workers may share one folder: skip covers that are done or claimed
-        if (out_dir / f"{wav.stem}.npy").exists():
-            continue
-        lock = out_dir / f"{wav.stem}.lock"
-        try:
-            if lock.exists() and time.time() - lock.stat().st_mtime > 1800:
-                lock.unlink(missing_ok=True)  # stale claim from a crashed worker
-            os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
-        except FileExistsError:
+        lock = claim(out_dir, wav.stem)
+        if lock is None:
             continue
         t0 = time.time()
         try:
@@ -68,6 +61,36 @@ def main(argv=None):
             t_wall += time.time() - t0
         if i % 20 == 0 or i == len(todo):
             print(f"[{i}/{len(todo)}] {t_audio / max(t_wall, 1e-6):.1f}x realtime", flush=True)
+
+
+STALE_LOCK_SEC = 1800
+
+
+def claim(out_dir: Path, stem: str) -> Path | None:
+    """Claim one cover for this process; None if it is done or another worker holds it.
+
+    Several workers may share one folder. A claim is an exclusively created `<stem>.lock`;
+    one older than STALE_LOCK_SEC belongs to a crashed worker and is taken over by renaming
+    it away, which only one process can win.
+    """
+    done = out_dir / f"{stem}.npy"
+    if done.exists():
+        return None
+    lock = out_dir / f"{stem}.lock"
+    try:
+        if time.time() - lock.stat().st_mtime > STALE_LOCK_SEC:
+            os.replace(lock, out_dir / f"{stem}.lock.stale.{os.getpid()}")
+            (out_dir / f"{stem}.lock.stale.{os.getpid()}").unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass  # no lock, or another worker took the stale one over first
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        return None
+    if done.exists():  # finished by another worker between the check and the claim
+        lock.unlink(missing_ok=True)
+        return None
+    return lock
 
 
 def _transcribe_one(model, wav, out_dir, args) -> float:
@@ -86,7 +109,7 @@ def _transcribe_one(model, wav, out_dir, args) -> float:
         print(f"skip {wav.name}: out of GPU memory under the --vram-fraction cap", flush=True)
         return 0.0
     ev = events.sanitize(events.from_transkun_notes(notes))
-    tmp = out_dir / f"{wav.stem}.tmp.npy"
+    tmp = out_dir / f"{wav.stem}.{os.getpid()}.tmp.npy"  # per process: workers never share it
     events.save_npy(tmp, ev)
     tmp.replace(out_dir / f"{wav.stem}.npy")
     if args.midi:
