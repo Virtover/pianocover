@@ -4,7 +4,8 @@
 
 Each piano version is paired with one organ recording of the same piece, alternating between
 the recordings. Recordings released by a major label are excluded (same rule as the song list,
-docs/MODEL_LICENSES.md): EXCLUDE lists them by title fragment.
+docs/MODEL_LICENSES.md) and recordings of a different, protected work: EXCLUDE lists them
+by title fragment.
 """
 import argparse
 import csv
@@ -13,6 +14,7 @@ import json
 EXCLUDE = {
     "Trifonov": "Deutsche Grammophon release (Universal Music)",
     "Karl Richter": "Archiv Produktion release (Universal Music)",
+    "Paul Manz": "his own chorale-prelude composition (d. 2009), not the hymn itself",
 }
 
 

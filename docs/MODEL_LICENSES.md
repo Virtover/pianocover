@@ -134,6 +134,19 @@ Trifonov (Deutsche Grammophon) and Karl Richter (Archiv Produktion), both Univer
 Labels were judged from titles and channels, not looked up. Search: `scripts/find_organ_pairs.py`,
 pairing: `scripts/organ_to_pairs.py`.
 
+- **Score pairs** (`scripts/pdmx_organ.py`): the target is a PDMX score (CC BY 4.0 dataset;
+  attribution: Long et al. 2024, arXiv 2409.10831) instead of a piano cover, since a piano version
+  of an organ piece is usually the same notes. Only organ-only scores in the
+  `no_license_conflict` + `deduplicated` subsets whose composer died before 1955 (name list in
+  the script); dropped modern arrangements (Virgil Fox, D. W. Roman) and every score without a
+  composer, since PDMX users also mark protected pop pieces as public domain. The input is a web
+  organ recording (`license=unknown`, as above). The score is rendered with the YDP grand piano
+  soundfont (CC BY 3.0) only to align it; that audio is not training data.
+- **Partly organ** (`pairs/organ_partial.csv`, `find_organ_pairs.py --partial`): public-domain
+  hymns recorded with choir / congregation / brass and organ, against web piano versions.
+  Excluded Paul Manz's "A Mighty Fortress" (his own chorale prelude, d. 2009). Some originals are
+  modern choral arrangements (C. Gower, D. Hill), accepted like other web recordings.
+
 ## Content filter (owner's decision, 2026-11-14)
 
 Not a license rule. Dropped: K-pop idol acts (per artist), and songs whose lyrics or title are

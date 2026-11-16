@@ -229,6 +229,27 @@ python -m pianocover.apc.train --ds /data/ds --init /data/ext/amt-apc/models/par
 `build_dataset` tags web pairs `license=unknown`, so `merge_datasets --licensed-only` drops
 them; train on `/data/ds` directly instead.
 
+**Covers filtered by sound.** `pianocover.scan_covers` (run by the pipeline before
+`build_dataset`) drops "covers" with singing and re-uploads of the original; thresholds were set
+by listening tests. `build_dataset --refilter` re-applies it to an existing dataset without aligning
+again.
+
+**Organ.** Three small organ sources (docs/MODEL_LICENSES.md) are built separately and merged
+without re-aligning anything (about a minute; hard-link `apc/spec` from `/data/ds` first so only
+the new recordings get spectrograms):
+
+| Source | Built from | Usable pairs |
+|---|---|---|
+| organ works + web piano versions | `pairs/organ.csv` (`scripts/find_organ_pairs.py`) | 39 |
+| organ works + public-domain score as target | `scripts/pdmx_organ.py` (PDMX) | 19 |
+| hymns with choir / congregation and organ | `pairs/organ_partial.csv` (`find_organ_pairs.py --partial`) | 23 |
+
+```bash
+python -m pianocover.merge_datasets /data/ds /data/organ_pilot_ds /data/pdmx_organ_ds /data/organ_partial_ds --out /data/ds_all
+mkdir -p /data/ds_all/apc && cp -al /data/ds/apc/spec /data/ds_all/apc/spec
+python -m pianocover.apc.prepare --ds /data/ds_all     # then train with --ds /data/ds_all
+```
+
 ## Use it from the transcription server
 
 ```python

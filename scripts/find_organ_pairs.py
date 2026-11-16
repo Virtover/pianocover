@@ -34,6 +34,22 @@ PIECES = [
     ("Hymn - Now Thank We All Our God / Nun danket", "Now Thank We All Our God hymn", r"now thank we|nun danket"),
     ("Hymn - Amazing Grace", "Amazing Grace hymn", r"amazing grace"),
 ]
+# --partial: public-domain hymns sung with organ (choir / congregation + organ) as originals
+PARTIAL = [
+    ("Hymn - Holy, Holy, Holy (Nicaea)", "Holy Holy Holy Lord God Almighty", r"holy,? holy,? holy"),
+    ("Hymn - A Mighty Fortress / Ein feste Burg", "A Mighty Fortress Is Our God", r"mighty fortress|feste burg"),
+    ("Hymn - Now Thank We All Our God", "Now Thank We All Our God", r"now thank we"),
+    ("Hymn - Praise to the Lord, the Almighty", "Praise to the Lord the Almighty", r"praise to the lord,? the almighty"),
+    ("Hymn - Joyful, Joyful, We Adore Thee", "Joyful Joyful We Adore Thee", r"joyful,? joyful"),
+    ("Hymn - Crown Him with Many Crowns", "Crown Him with Many Crowns", r"crown him with many crowns"),
+    ("Hymn - It Is Well with My Soul", "It Is Well with My Soul", r"it is well"),
+    ("Hymn - O God, Our Help in Ages Past", "O God Our Help in Ages Past", r"o god,? our help"),
+    ("Hymn - All Creatures of Our God and King", "All Creatures of Our God and King", r"all creatures of our god"),
+    ("Hymn - Jesus Christ Is Risen Today", "Jesus Christ Is Risen Today", r"jesus christ is risen today"),
+    ("Hymn - O Come, All Ye Faithful", "O Come All Ye Faithful", r"o come,? all ye faithful"),
+    ("Hymn - Hark! The Herald Angels Sing", "Hark the Herald Angels Sing", r"hark,? the herald"),
+]
+WITH_VOICES = re.compile(r"choir|chorus|congregation|congregational|sing|sung|hymn sing|cathedral|chapel|abbey|lyrics", re.I)
 ORGAN = re.compile(r"organ|orgel|orgue|organo|오르간|オルガン", re.I)
 PIANO = re.compile(r"piano|klavier|피아노|ピアノ|钢琴|鋼琴", re.I)
 NOT_COVER = re.compile(
@@ -67,12 +83,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--sleep", type=float, default=3.0)
+    ap.add_argument("--partial", action="store_true",
+                    help="hymns sung with organ (choir/congregation + organ) instead of organ solo")
     a = ap.parse_args()
     ydl = YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True})
     seen = set()
     with open(a.out, "w", encoding="utf8") as f:
-        for name, q, piece_re in PIECES:
-            orig = pick(search(ydl, f"{q} organ", 20), piece_re, ORGAN, NOT_ORIGINAL, None, seen, 2)
+        for name, q, piece_re in (PARTIAL if a.partial else PIECES):
+            if a.partial:
+                entries = search(ydl, f"{q} choir organ", 25)
+                entries = [e for e in entries if WITH_VOICES.search(e.get("title") or "")]
+                orig = pick(entries, piece_re, ORGAN, NOT_ORIGINAL, None, seen, 2)
+            else:
+                orig = pick(search(ydl, f"{q} organ", 20), piece_re, ORGAN, NOT_ORIGINAL, None, seen, 2)
             time.sleep(a.sleep)
             cov = pick(search(ydl, f"{q} piano", 25), piece_re, PIANO, NOT_COVER, None, seen, 4)
             time.sleep(a.sleep)
