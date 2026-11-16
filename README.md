@@ -59,7 +59,8 @@ your card.
 - generation, 30 s of audio: 0.83 GiB peak;
 - checkpointed vs plain FiLM gradients: relative difference 1e-7.
 
-sm_120 (RTX 5070) has not been run yet.
+sm_120 (RTX 5070) has not been run yet. To benchmark a new GPU, follow
+[docs/BENCHMARK.md](docs/BENCHMARK.md) (written as a step-by-step runbook an AI agent can follow).
 
 ## Stopping and resuming training
 
@@ -220,8 +221,8 @@ python -m pianocover.apc.train --ds /data/ds --init /data/ext/amt-apc/models/par
   | fp32, not compiled (close to AMT-APC's own trainer) | 0.05 windows/s (spilled to RAM) | 10.5 GiB |
 
   One window (8.2 s) already fills the GPU, so a larger batch is not faster; batch 2 needs
-  12 GiB. Estimate for the full set (about 180 h of aligned audio, about 80k windows per epoch):
-  about 5 h per epoch on the 3060 Ti; the 5070 should be faster (not measured).
+  12 GiB. Estimate for `/data/ds_all` (2026-11-16: 64,210 training windows per epoch, counted):
+  about 3.8 h per epoch on the 3060 Ti; the 5070 should be faster (not measured).
 - `--bench 30` times a configuration and exits. `pianocover.apc.model` loads `apc.pth`
   strictly and reproduces AMT-APC's outputs (max difference 2e-5 in fp32); saved checkpoints
   keep the `apc.pth` layout, so the transcription server can load them as they are.
