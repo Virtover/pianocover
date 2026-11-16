@@ -3,6 +3,9 @@
 For each (pop, cover) pair: align, transpose the cover to the original's key, warp the
 cover notes onto the original's timeline, drop notes from passages that do not follow the
 original, compute the style vector, and record unusable regions of the original.
+Pairs whose "cover" has singing or sounds like the original itself (pianocover.scan_covers,
+<data>/cover_scan.csv) are dropped first, as `cover_vocals` / `cover_same_as_original`.
+`--refilter` re-applies that filter to an existing --out without aligning again.
 
 Output (in --out):
   train.pkl, val.pkl     list of dicts, see `process_pair`
@@ -42,6 +45,9 @@ def process_pair(item):
     cover_wav = find_audio(data / "cover", piano_id)
     ev_path = data / "cover_events" / f"{piano_id}.npy"
     base = {"pop_id": pop_id, "piano_id": piano_id}
+    rejected = scan_status(a.scan_rows.get((pop_id, piano_id)), a.max_cover_vocal, a.max_timbre)
+    if rejected:
+        return {**base, "status": rejected}
     try:
         if not (pop_wav and cover_wav and ev_path.exists()):
             return {**base, "status": "missing_files"}
@@ -93,6 +99,25 @@ def process_pair(item):
                 "trace": traceback.format_exc(limit=3)}
 
 
+def scan_status(row: dict | None, max_vocal: float, max_timbre: float) -> str | None:
+    """Rejection status from a pianocover.scan_covers row, or None to keep the pair."""
+    if not row:
+        return None
+    if float(row["cover_vocal"]) > max_vocal:
+        return "cover_vocals"
+    if float(row["timbre"]) > max_timbre:
+        return "cover_same_as_original"
+    return None
+
+
+def load_scan(path: Path) -> dict:
+    if not path.exists():
+        print(f"no {path}: cover vocal / same-recording filter off (run pianocover.scan_covers)", flush=True)
+        return {}
+    with path.open() as f:
+        return {(r["pop_id"], r["piano_id"]): r for r in csv.DictReader(f)}
+
+
 def _is_val(pop_id: str, fraction: float) -> bool:
     h = int(hashlib.md5(pop_id.encode()).hexdigest()[:8], 16)
     return (h % 10000) < fraction * 10000
@@ -114,22 +139,53 @@ def main(argv=None):
     ap.add_argument("--min-key-margin", type=float, default=0.02, help="reject unclear key detection")
     ap.add_argument("--max-bad-fraction", type=float, default=0.4)
     ap.add_argument("--min-notes", type=int, default=200)
+    ap.add_argument("--scan", help="pianocover.scan_covers output (default <data>/cover_scan.csv)")
+    ap.add_argument("--max-cover-vocal", type=float, default=0.03, help="drop covers with singing")
+    ap.add_argument("--max-timbre", type=float, default=0.9,
+                    help="drop 'covers' that sound like the original (re-uploads, band arrangements)")
+    ap.add_argument("--refilter", action="store_true",
+                    help="re-apply the scan filter to the dataset already in --out, without re-aligning")
     args = ap.parse_args(argv)
 
     data, out = Path(args.data), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    with (data / "pairs.csv").open() as f:
-        pairs = [(r["pop_id"], r["piano_id"]) for r in csv.DictReader(f)]
-    print(f"processing {len(pairs)} pairs with {args.workers} workers", flush=True)
+    args.scan_rows = load_scan(Path(args.scan) if args.scan else data / "cover_scan.csv")
 
-    results = []
-    with Pool(args.workers, initializer=_init, initargs=(args,)) as pool:
-        for i, r in enumerate(pool.imap_unordered(process_pair, pairs, chunksize=2), 1):
-            results.append(r)
-            if i % 50 == 0 or i == len(pairs):
-                n_ok = sum(x["status"] == "ok" for x in results)
-                print(f"[{i}/{len(pairs)}] ok={n_ok}", flush=True)
+    if args.refilter:
+        results = _refilter(out, args)
+    else:
+        with (data / "pairs.csv").open() as f:
+            pairs = [(r["pop_id"], r["piano_id"]) for r in csv.DictReader(f)]
+        print(f"processing {len(pairs)} pairs with {args.workers} workers", flush=True)
+        results = []
+        with Pool(args.workers, initializer=_init, initargs=(args,)) as pool:
+            for i, r in enumerate(pool.imap_unordered(process_pair, pairs, chunksize=2), 1):
+                results.append(r)
+                if i % 50 == 0 or i == len(pairs):
+                    n_ok = sum(x["status"] == "ok" for x in results)
+                    print(f"[{i}/{len(pairs)}] ok={n_ok}", flush=True)
+    _write(results, data, out, args)
 
+
+def _refilter(out: Path, args) -> list:
+    """Previous results (usable pairs from the pickles, the rest from report.csv) with the scan
+    filter applied again; the alignment itself is reused."""
+    ok = []
+    for name in ("train", "val"):
+        with (out / f"{name}.pkl").open("rb") as f:
+            ok += pickle.load(f)["items"]
+    keys = {(r["pop_id"], r["piano_id"]) for r in ok}
+    with (out / "report.csv").open() as f:
+        rest = [r for r in csv.DictReader(f) if (r["pop_id"], r["piano_id"]) not in keys]
+    for r in ok:
+        status = scan_status(args.scan_rows.get((r["pop_id"], r["piano_id"])), args.max_cover_vocal, args.max_timbre)
+        if status:
+            r["status"] = status
+    print(f"refilter: {len(ok)} usable before, {sum(r['status'] == 'ok' for r in ok)} after", flush=True)
+    return ok + rest
+
+
+def _write(results: list, data: Path, out: Path, args) -> None:
     with (out / "report.csv").open("w", newline="") as f:
         cols = ["pop_id", "piano_id", "status", "quality", "transpose", "key_margin",
                 "bad_fraction", "n_notes", "error"]

@@ -28,6 +28,9 @@ while true; do
   sleep 60
 done
 
+echo "== $(date) scan covers (singing, re-uploaded originals)"
+python -m pianocover.scan_covers --data "$DATA" 2>&1 | grep -v -i warn | tail -3
+
 echo "== $(date) align + build"
 python -m pianocover.build_dataset --data "$DATA" --out "$DS" --workers 4 2>&1 | tail -4
 echo "== $(date) AMT-APC inputs"
