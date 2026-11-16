@@ -122,6 +122,18 @@ Data: `data/meta/` (not in git). Titles via YouTube oEmbed (`scripts/probe_pair_
   196 survivors, since MusicBrainz often lists only compilation labels. 4 keep.
 - 3 of 30 sampled covers were private, blocked or removed; expect further loss when downloading.
 
+## Organ list (`pairs/organ.csv`, pilot, 2026-11-16)
+
+Originals are organ (or partly organ) recordings of public-domain works: Bach chorale preludes
+and free works, Widor and Boëllmann toccatas, and the hymns Holy Holy Holy (Nicaea), Ein feste
+Burg, Nun danket and Amazing Grace (New Britain). The piano versions are web covers like the rest
+(`license=unknown`); some are arrangements that may still be protected (Myra Hess, BWV 147;
+Wilhelm Kempff, BWV 645; Isidor Philipp, BWV 578), which the owner accepted on the same basis
+as other web covers. The major-label rule applies to these recordings too: excluded Daniil
+Trifonov (Deutsche Grammophon) and Karl Richter (Archiv Produktion), both Universal Music.
+Labels were judged from titles and channels, not looked up. Search: `scripts/find_organ_pairs.py`,
+pairing: `scripts/organ_to_pairs.py`.
+
 ## Content filter (owner's decision, 2026-11-14)
 
 Not a license rule. Dropped: K-pop idol acts (per artist), and songs whose lyrics or title are
