@@ -48,7 +48,8 @@ from pianocover.apc.prepare import padded_spec  # noqa: E402
 MODERN = re.compile(r"langlais|howells|messiaen|duruflé|durufle|\balain\b|dupré|dupre|fonsi|zimmer|"
                     r"john williams|myself|^composer$|\(wip\)|\bwip\b|virgil fox|interstellar|"
                     r"hillsong|tomlin|redman|maher|getty|townend|pokemon|pokémon|zelda|mario|minecraft|"
-                    r"undertale|anime|disney|star wars|harry potter|game of thrones|tetris", re.I)
+                    r"undertale|anime|disney|star wars|harry potter|game of thrones|tetris|zorba|theodorakis|"
+                    r"let it go|piano guys|frozen|titanic|pirates of the caribbean|tribute to the", re.I)
 # composers who died before 1955 (or a pre-1900 year in the composer field): the PDMX license
 # covers the engraving; this keeps the composition public domain too (the first smoke test
 # without it picked Naruto, Green Onions and Profondo Rosso by view count)
