@@ -128,6 +128,20 @@ python -m pianocover.apc.train --ds /data/ds_all --init /data/ext/amt-apc/models
    training command for this GPU (the fastest configuration that fit), the epoch estimate
    (labelled as an estimate), and anything that failed with its error message.
 
+## Reference: RTX 5070 12 GB (sm_120), 2026-11-17
+
+`bench_matrix.sh` on `/data/apc_test/ds`; the logs are in `/data/runs/apc_5070/logs`.
+
+| Setting | Result |
+|---|---|
+| bf16, batch 1 × accum 4, compiled | 501 ms/step, 7.98 windows/s (65 s of audio per s), 6.09 GiB |
+| fp16, batch 1 | 501 ms/step, 7.99 windows/s, 6.09 GiB |
+| fp32, batch 1 | 1208 ms/step, 3.31 windows/s, 9.54 GiB |
+| bf16, batch 2 | out of memory (10.96 GiB allowed under the 0.92 cap) |
+| bf16 `--freeze-encoder` | 327 ms/step, 12.22 windows/s, 3.25 GiB |
+| bf16 not compiled | 740 ms/step, 5.41 windows/s, 7.71 GiB |
+| full training, `/data/ds_all`, 40,000 steps | 5 h 16 min (about 2.5 epochs) |
+
 ## Reference: RTX 3060 Ti 8 GB (sm_86), dev machine
 
 | Benchmark | Setting | Result |

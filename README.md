@@ -59,7 +59,8 @@ your card.
 - generation, 30 s of audio: 0.83 GiB peak;
 - checkpointed vs plain FiLM gradients: relative difference 1e-7.
 
-sm_120 (RTX 5070) has not been run yet. To benchmark a new GPU, follow
+On sm_120 (RTX 5070) the AMT-APC benchmark and the full training ran (2026-11-17/18, results
+below under "Web pairs" and "Trained model"); `check_env.py`'s output there was not recorded. To benchmark a new GPU, follow
 [docs/BENCHMARK.md](docs/BENCHMARK.md) (written as a step-by-step runbook an AI agent can follow).
 
 ## Stopping and resuming training
@@ -222,8 +223,20 @@ python -m pianocover.apc.train --ds /data/ds --init /data/ext/amt-apc/models/par
 
   One window (8.2 s) already fills the GPU, so a larger batch is not faster; batch 2 needs
   12 GiB. Estimate for `/data/ds_all` (2026-11-16: 64,210 training windows per epoch, counted):
-  about 3.8 h per epoch on the 3060 Ti; the 5070 should be faster (not measured).
-- `--bench 30` times a configuration and exits. `pianocover.apc.model` loads `apc.pth`
+  about 3.8 h per epoch on the 3060 Ti.
+- **Training speed, measured on the RTX 5070** (12 GB, sm_120, `scripts/bench_matrix.sh`,
+  2026-11-17):
+
+  | Setting | Throughput | Peak VRAM |
+  |---|---|---|
+  | bf16, batch 1, accum 4, compiled (default) | 7.98 windows/s (65 s of audio per s) | 6.09 GiB |
+  | fp16, batch 1 | 7.99 windows/s | 6.09 GiB |
+  | fp32, batch 1 | 3.31 windows/s | 9.54 GiB |
+  | bf16, batch 2 | out of memory under the 0.92 cap | |
+  | `--freeze-encoder` | 12.22 windows/s | 3.25 GiB |
+  | not compiled | 5.41 windows/s | 7.71 GiB |
+- `--bench 30` times a configuration and exits (`scripts/bench_matrix.sh` runs the whole
+  matrix; see docs/BENCHMARK.md). `pianocover.apc.model` loads `apc.pth`
   strictly and reproduces AMT-APC's outputs (max difference 2e-5 in fp32); saved checkpoints
   keep the `apc.pth` layout, so the transcription server can load them as they are.
 
@@ -249,6 +262,28 @@ the new recordings get spectrograms):
 python -m pianocover.merge_datasets /data/ds /data/organ_pilot_ds /data/pdmx_organ_ds /data/organ_partial_ds --out /data/ds_all
 mkdir -p /data/ds_all/apc && cp -al /data/ds/apc/spec /data/ds_all/apc/spec
 python -m pianocover.apc.prepare --ds /data/ds_all     # then train with --ds /data/ds_all
+```
+
+## Trained model: RTX 5070, 2026-11-18
+
+Fine-tuned from `apc.pth` on `/data/ds_all` with the defaults (bf16, batch 1 × accum 4, lr 5e-5,
+cosine to 5e-6): 40,000 steps, about 2.5 epochs, 5 h 16 min on the 5070. Files are in the
+`pc-data` volume at `/data/runs/apc_5070` (`best.pth` = step 36,000; same layout as `apc.pth`)
+and on the USB backup.
+
+| Step | val loss | F1 onset | F1 frame | F1 velocity |
+|---|---|---|---|---|
+| 1,000 | 0.2997 | 0.237 | 0.574 | 0.221 |
+| **36,000 (`best.pth`)** | **0.2889** | **0.261** | **0.603** | **0.248** |
+| 40,000 (`last.pth`) | 0.2902 | 0.257 | 0.604 | 0.250 |
+
+The first validation is after 1,000 steps, so the original `apc.pth` was not scored on this
+validation set. Generate a cover with `scripts/generate_cover_apc.py` (AMT-APC's own `infer`
+with audio loading that works in this image):
+
+```bash
+cd /data/ext/amt-apc && python /w/scripts/generate_cover_apc.py song.wav -o cover.mid -s level2 \
+    --path_model /data/runs/apc_5070/best.pth
 ```
 
 ## Use it from the transcription server
