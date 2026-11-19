@@ -125,12 +125,22 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
 1. **Data, tier 3 first (CPU, runs in the background):** generalise `scripts/organ_synth.py`
    into `scripts/score_synth.py` (families, 44.1 kHz, Transkun pickle, augment options).
    Listen to 5 samples per family before the full run.
+   **Done 2026-11-19:** /data/synth_tk2, 1406 renders, 78 h train + 3.7 h val, 22.9 GB, checked
+   (16-bit WAV, lengths, notes). Drums re-rendered louder after listening (CC7 gain bug).
 2. **Capacity test (about 1-2 h on the 3060 Ti, VRAM ≤ 5 GiB, including batch size and
    checkpointing):** fine-tune 2.0.pt on 2-3 h of synthetic data. Pass: training-set onset F1
    ≥ 0.95. Fail → larger config or a different architecture, before collecting more data.
 3. **Tier 1 download + licence check:** MusicNet(+EM), Dagstuhl, GuitarSet, URMP, Bach10.
    Licence rows go in MODEL_LICENSES.md; NC ones in the NC log. Convert to the same pickle.
 4. **Tier 2:** piano replay pickle from /data/ds_all (audio + `cover_events`).
+   **Backup before training (ask the owner first, do not start without an explicit yes):** copy
+   the repo and the whole `pc-data` volume (incl. /data/synth_tk2 and the tier 1 / tier 2 data)
+   to the USB drive, F:\pianocover-backup, the way the earlier backups were made: the repo with
+   `robocopy /MIR` into F:\pianocover-backup\repo, the volume as a tar stream through stdout
+   (Docker cannot mount F: directly) written as `pc-data.tar.part`, its file list verified
+   against the volume, then renamed to `pc-data.tar` (the old archive is replaced only then). No writes to the volume while the tar runs (stop GPU
+   and data jobs first). Tell the owner the expected size and time (the volume was ~100 GB used
+   on 2026-11-19) and check free space on F: before asking.
 5. **Training:** init 2.0.pt, lower max_lr than the default 2e-4 (start at 5e-5), mixed
    sampling as above, validation per source every N steps. Memory: ≤ 5 GiB VRAM; measure batch
    size × segment length × checkpointing first (`bench`-style, like `scripts/bench_matrix.sh`).
@@ -139,6 +149,25 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    check against 2.0.pt on held-out piano covers. Optional reference: YourMT3+ on the same
    files (evaluation only; check its weights' licence). Then listening on the 7 request songs.
 7. **Reduction module and wrapper** (can be built in parallel with 1-5, it only needs MIDI).
+   Reduction in progress (see its status below); wrapper not started.
+8. **Pianist Transformer, only after Transkun is trained and passed phase 6.**
+   [yhj137/PianistTransformer](https://github.com/yhj137/PianistTransformer) (ICML 2026):
+   score MIDI → expressive performance MIDI (timing, velocity, articulation, pedal); 135 M
+   parameters, about 270 MB, runs on CPU; code and weights Apache-2.0 (HF metadata; training
+   data not named, which is no blocker under the 2026-11-12 policy). Two uses:
+   1. **More realistic synthetic piano data, second Transkun round:** pass the piano (and
+      chamber) scores through it before rendering, so the audio has human rubato, dynamics and
+      pedal instead of a metronome. The pair stays 1:1: the audio is rendered from the same
+      humanised MIDI that becomes the target. Compare against the first-round model on the real
+      piano test data (phase 6); keep it only if piano F1 does not drop.
+   2. **A "performance" version of the output** (wrapper option, below): the reduced,
+      quantised result rendered expressively for playback, next to the quantised one for
+      learning / sheet music. Its input must be score-like (quantised): reduced or teacher
+      output, not raw transcription, which already has performance timing.
+   Before use: read the paper's own numbers (the README only says "indistinguishable from human
+   pianists" in the authors' listening test) and a 1-hour listening test on the 5a samples and a
+   few synth_tk2 piano renders. README warning: very low temperature gives extreme expression or
+   repetitive patterns.
 
 ## Reduction ("reduced" mode)
 
@@ -169,12 +198,32 @@ Tests:
 - known cases (orchestral tutti, string quartet, organ trio, the 10 PDMX samples);
 - idempotence: reduce(reduce(x)) == reduce(x).
 
+**Status 2026-11-19** (`pianocover/reduce.py`, 21 tests in `tests/test_reduce.py`; samples in
+Downloads/pianocover_perkusja_test, variants 2-5b, listened to by the owner):
+- done: hand assignment, playability check (5 notes / a 10th per hand), minimal fixes 1, 2, 4,
+  5 above; notes held longer than 0.3 s count as pedal-held (`Limits.pedal_after`; without it
+  an organ trio lost 61% of its notes); the two outer voices are never removed;
+- not done: step 3 (moving a note to the other hand), leap limits;
+- repeated notes and fast textures, after listening:
+  - rejected: per-key repetition rules ("hold" missed fast sequences, octave "tremolo" did not
+    help playability, "half" left gaps) and per-hand rate limits on a beat grid (4a/4b: even
+    after fixing bar-boundary gaps, beat_this jitter and phase, they flattened the piece's
+    characteristic details);
+  - current candidate `simplify()` (5a / 5b): only REPETITIVE fast textures longer than a beat
+    are simplified (tremolo / repeated chords → chord on the beats or octave alternation;
+    Alberti / ostinato on <= 4 keys → same figure on a coarser grid; trills → mordent);
+    melody, short bursts, scales and passages stay. Awaiting the owner's verdict.
+- beat grid: beat_this beats are regularised first (local linear fit, then phase to strong
+  onsets): raw beats jittered ±40 ms and sat 11-39 ms early on the test renders.
+
 ## Wrapper
 
 `pianocover/transcribe_any.py`:
 - `transcribe(audio_path, mode="full"|"reduced", model=..., device=...) -> events, report`;
 - CLI `python -m pianocover.transcribe_any song.mp3 -o out.mid --mode reduced`;
-- full runs Transkun (fine-tuned weights), reduced runs the same and then `reduce()`.
+- full runs Transkun (fine-tuned weights), reduced runs the same and then `reduce()`;
+- later (phase 8): `--perform` adds a Pianist Transformer rendering of the reduced result for
+  playback; the quantised file stays the main output.
 
 ## Open items
 
