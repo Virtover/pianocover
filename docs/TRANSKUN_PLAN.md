@@ -134,13 +134,23 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    Licence rows go in MODEL_LICENSES.md; NC ones in the NC log. Convert to the same pickle.
 4. **Tier 2:** piano replay pickle from /data/ds_all (audio + `cover_events`).
    **Backup before training (ask the owner first, do not start without an explicit yes):** copy
-   the repo and the whole `pc-data` volume (incl. /data/synth_tk2 and the tier 1 / tier 2 data)
-   to the USB drive, F:\pianocover-backup, the way the earlier backups were made: the repo with
-   `robocopy /MIR` into F:\pianocover-backup\repo, the volume as a tar stream through stdout
-   (Docker cannot mount F: directly) written as `pc-data.tar.part`, its file list verified
-   against the volume, then renamed to `pc-data.tar` (the old archive is replaced only then). No writes to the volume while the tar runs (stop GPU
-   and data jobs first). Tell the owner the expected size and time (the volume was ~100 GB used
-   on 2026-11-19) and check free space on F: before asking.
+   the repo and **only what the Transkun training needs**, not the whole volume, to the USB
+   drive, F:\pianocover-backup:
+   - /data/synth_tk2 (tier 3 renders, pickles, meta);
+   - the tier 1 data as converted for training (audio + pickles of the sources that passed the
+     gate), plus their licence notes;
+   - the tier 2 piano replay set: its pickle and only the cover audio files it references
+     (not all of /data/raw);
+   - anything else the training command reads (noise / IR folders, split files).
+   Not needed: AMT-APC data and spectrograms (/data/ds*, /data/runs), raw web downloads not in
+   the replay set, PDMX, aria, fma. The full-volume snapshot already on F: (pc-data.tar,
+   2026-11-17) stays as it is; the new copy is a separate `pc-data-transkun.tar`.
+   Method as for the earlier backups: the repo with `robocopy /MIR` into
+   F:\pianocover-backup\repo; the data as a tar stream through stdout (Docker cannot mount F:
+   directly) written as `pc-data-transkun.tar.part`, its file list verified against the
+   source, then renamed. No writes to these folders while the tar runs (stop GPU and data jobs
+   first). Before asking, list the folders with their sizes, the expected time, and the free
+   space on F:.
 5. **Training:** init 2.0.pt, lower max_lr than the default 2e-4 (start at 5e-5), mixed
    sampling as above, validation per source every N steps. Memory: ≤ 5 GiB VRAM; measure batch
    size × segment length × checkpointing first (`bench`-style, like `scripts/bench_matrix.sh`).
