@@ -137,8 +137,17 @@ def audio_midi(midi_bytes, fam, rng):
 
     pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
     cfg = {"programs": [], "ranks": ""}
+    # CC7 is roughly 40*log10(cc/127) dB in fluidsynth: 0.8 is about -4 dB, 0.25 would be -24 dB.
+    # Pitched tracks stay within ~4 dB (a quieter inner voice that is still in the target must
+    # stay audible); drums from about -4 dB to full, with harder hits (score velocities are low).
+    kit = rng.choices([0, 8, 16, 32, 40], weights=[4, 2, 2, 1, 1])[0]
     for inst in pm.instruments:
-        gain = rng.uniform(0.5, 1.0) if not inst.is_drum else rng.uniform(0.25, 1.0)
+        gain = rng.uniform(0.8, 1.0) if not inst.is_drum else rng.uniform(0.8, 1.0)
+        if inst.is_drum:
+            inst.program = kit
+            boost = rng.uniform(1.1, 1.4)
+            for n in inst.notes:
+                n.velocity = int(np.clip(max(n.velocity, 70) * boost, 1, 127))
         inst.control_changes = [c for c in inst.control_changes if c.number not in (0, 32)]
         has7 = False
         for c in inst.control_changes:
@@ -146,10 +155,10 @@ def audio_midi(midi_bytes, fam, rng):
                 c.value = int(np.clip(c.value * gain, 1, 127))
                 has7 = True
         if not has7:
-            inst.control_changes.insert(0, pretty_midi.ControlChange(7, int(100 * gain), 0.0))
+            inst.control_changes.insert(0, pretty_midi.ControlChange(7, int(127 * gain), 0.0))
         if not inst.is_drum and inst.program in SWAP_OF and rng.random() < 0.6:
             inst.program = rng.choice(SWAP_OF[inst.program])
-        cfg["programs"].append("drums" if inst.is_drum else inst.program)
+        cfg["programs"].append(f"drums{kit}" if inst.is_drum else inst.program)
     if fam == "organ":  # extra ranks in the audio only: harmonics the model must not report
         r = rng.random()
         add = [12] if r < 0.3 else ([12, 19] if r < 0.5 else [])

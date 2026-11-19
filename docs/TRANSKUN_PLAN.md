@@ -59,7 +59,13 @@ there (flags, log, no redistribution, delete raw copies after training).
 | GuitarSet | Real guitar, note annotations from a hexaphonic pickup (~3 h) | **Verify** (Zenodo record / GitHub). Guitar matters for this project |
 | URMP | 44 chamber pieces, mixes + MIDI scores | No license found yet (Dryad doi:10.5061/dryad.ng3r749). **Verify**; if research-only, treat as NC |
 | Bach10 | 10 Bach chorales, quartet recordings + MIDI | Unclear; a derivative is CC BY-NC-SA 3.0. **Verify**, else treat as NC |
-| PDMX organ, real recordings | 19 organ recordings DTW-aligned to scores (/data/ds_pdmx) | PDMX CC BY 4.0, scores PD/CC0; recordings from YouTube under the 2026-11-12 policy |
+| ~~PDMX organ, real recordings~~ | **Excluded (2026-11-19).** 19 organ recordings DTW-aligned to scores: listening showed the alignment breaks the rhythm and flow, which would teach wrong onsets | — |
+
+**Gate for every tier-1 source:** labels made by aligning a score to a recording (DTW etc.) are
+suspect. Before a source is used, export 3-5 pairs with a control file (recording on the left
+channel, labels rendered on the right) and get the owner's OK by ear. Sources whose notes were
+captured during the recording (hexaphonic pickup, per-instrument tracks) are preferred.
+MusicNet's original labels are score-aligned; MusicNetEM claims onsets within 32 ms, still gated.
 
 Small sets are duplicated in the training pickle (Transkun samples segments by duration), so
 together they make about 30% of the training segments *(target, tune after phase 2)*.
@@ -129,7 +135,7 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    sampling as above, validation per source every N steps. Memory: ≤ 5 GiB VRAM; measure batch
    size × segment length × checkpointing first (`bench`-style, like `scripts/bench_matrix.sh`).
 6. **Evaluation:** note F1 (onset; onset+offset) per source on held-out **real** data:
-   MusicNet test, Dagstuhl subset, URMP/Bach10 subset, PDMX organ real, plus a piano regression
+   MusicNet test, Dagstuhl subset, URMP/Bach10 subset (each only if it passed the gate), plus a piano regression
    check against 2.0.pt on held-out piano covers. Optional reference: YourMT3+ on the same
    files (evaluation only; check its weights' licence). Then listening on the 7 request songs.
 7. **Reduction module and wrapper** (can be built in parallel with 1-5, it only needs MIDI).
