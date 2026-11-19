@@ -45,6 +45,14 @@ class Limits:
     max_notes: int = 5      # notes per hand
     max_span: int = 16      # semitones per hand (a 10th)
     onset_tol: float = 0.035
+    # a note held longer than this is taken to be sustained by the pedal, not by a finger: it
+    # no longer counts towards notes / span per hand (None: every sounding note needs a finger,
+    # which cut 61% of the notes of an organ trio with long pedal and manual notes)
+    pedal_after: float | None = 0.3
+
+    def fingered(self, start, t):
+        """Mask of sounding notes (start <= t) that still need a finger at time t."""
+        return np.ones(len(start), bool) if self.pedal_after is None else (t - start) < self.pedal_after
 
 
 @dataclass
@@ -174,6 +182,7 @@ def assign_hands(notes: np.ndarray, lim: Limits) -> np.ndarray:
         grp = order[g0:i]
         t = notes[order[g0], START] + lim.onset_tol
         snd = np.flatnonzero((notes[:, START] <= t) & (notes[:, END] > t))
+        snd = snd[lim.fingered(notes[snd, START], t)]
         p = np.sort(notes[snd, PITCH])
         k = best_split(p, lim, prev)
         if k is not None and 0 < k < len(p):
@@ -629,8 +638,9 @@ def reduce(ev: np.ndarray, limits: Limits | None = None, repeat: str | None = No
         rep.onsets += 1
         new = np.arange(a, b)
 
-        def sounding():
+        def sounding():  # notes that need a finger now (older held notes ride on the pedal)
             idx = np.flatnonzero(alive[:b] & (notes[:b, END] > t))
+            idx = idx[lim.fingered(notes[idx, START], t)]
             return idx[np.argsort(notes[idx, PITCH], kind="stable")]
 
         idx = sounding()

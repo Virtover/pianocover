@@ -11,7 +11,9 @@ def playable(ev, lim=Limits()):
     """Every onset has a valid two-hand split of the notes sounding just after it."""
     n = ev[ev[:, 2] > 0]
     for t in np.unique(n[:, 0]):
-        s = np.sort(n[(n[:, 0] <= t + lim.onset_tol) & (n[:, 1] > t + lim.onset_tol), 2])
+        m = (n[:, 0] <= t + lim.onset_tol) & (n[:, 1] > t + lim.onset_tol)
+        m &= lim.fingered(n[:, 0], t + lim.onset_tol)
+        s = np.sort(n[m, 2])
         if best_split(s, lim, 60) is None:
             return False
     return True
@@ -35,11 +37,21 @@ def test_dense_chord_becomes_playable_and_keeps_outer_notes():
 
 def test_held_notes_released_before_dropping():
     held = [[0.0, 4.0, p, 70] for p in (50, 53, 57, 62, 65)]          # a sustained string chord
-    ev = np.array(held + chord(1.0, [36, 43, 72, 76, 79, 84]), np.float64)
+    ev = np.array(held + chord(0.2, [36, 43, 72, 76, 79, 84]), np.float64)  # struck 0.2 s later: still fingered
     out, rep = reduce(ev)
     assert playable(out)
     assert rep.shortened > 0
-    assert len(out[(out[:, 0] == 1.0)]) == 6       # the new chord is kept whole
+    assert len(out[(out[:, 0] == 0.2)]) == 6       # the new chord is kept whole
+
+
+def test_long_held_notes_ride_on_the_pedal():
+    # organ-trio-like: a long pedal note and a long manual chord, then new notes in both hands
+    held = [[0.0, 4.0, p, 70] for p in (36, 50, 53, 57, 62, 65)]
+    ev = np.array(held + chord(1.0, [43, 48, 72, 76, 79]), np.float64)
+    out, rep = reduce(ev)
+    assert rep.changed_onsets == 0 and np.array_equal(out, ev)            # held > 0.3 s: pedal, no cuts
+    strict, rep2 = reduce(ev, Limits(pedal_after=None))
+    assert rep2.changed_onsets == 1                                        # the old behaviour still available
 
 
 def tremolo_run(p=67, n=16, ioi=0.0625):  # 16 strikes, 16 per second
