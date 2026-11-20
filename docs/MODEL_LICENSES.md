@@ -16,6 +16,8 @@ license stated on the weights themselves.
 | beat_this (`final0`) | beats / downbeats | MIT | "The code and the published model weights are released under the MIT license." | 16 datasets, some "fully copyrighted or under limited Creative Commons licenses" | 2026-11-09 | github.com/CPJKU/beat_this README |
 | BTC (ISMIR 2019) | chords (correction only) | MIT | Not stated | Isophonics, Robbie Williams, UsPop2002 labels | 2026-11-09 | github.com/jayg996/BTC-ISMIR19 |
 | torchcrepe 0.0.24 (CREPE `full`) | vocal melody + bass line (f0 -> notes) | MIT (Copyright 2020 Max Morrison) | Bundled in the package (`torchcrepe/assets/full.pth`); README: "converted [from marl/crepe] using MMdnn". No separate weights license stated. Upstream marl/crepe is MIT and bundles its pretrained model in the MIT package. | MIR-1K, Bach10, RWC-Synth, MedleyDB, MDB-STEM-Synth, NSynth | 2026-11-10 | github.com/maxrmorrison/torchcrepe (LICENSE, README, setup.py), github.com/marl/crepe |
+| SoulX-Singer (`model.pt`, 2.8 GB, repo commit 81aeb3a) | singing voice for synthetic training audio (`scripts/vocal_synth.py`); not shipped | Apache-2.0 (LICENSE file) | Apache-2.0 (README: "free to use the codes and model weights"; HF card tag apache-2.0). Disclaimer: no impersonation without authorisation, no deceptive audio | >42 k h of vocals, not named | 2026-11-19 | github.com/Soul-AILab/SoulX-Singer, huggingface.co/Soul-AILab/SoulX-Singer |
+| SoulX-Singer example prompts (`example/audio/{en,zh}_prompt`, `{en,zh,yue}_target`) | the 5 voice timbres the model clones | in the Apache-2.0 repo | n/a | singers not named; provenance not stated | 2026-11-19 | same repo. Open item: ask the authors whether these voices may be used, or replace them with CC BY / CC0 singing (vocadito) |
 
 | onnxruntime-gpu 1.22.0 | runtime for basic-pitch | MIT | n/a | n/a | 2026-11-09 | PyPI metadata |
 
@@ -79,7 +81,24 @@ societies have reserved their rights; lawful access is doubtful).
 ### NC source log
 | Date | Dataset | Official source | License | Reservation check | Used for |
 |---|---|---|---|---|---|
-| (none yet) | | | | | |
+| 2026-11-19 | Dagstuhl ChoirSet (choir, real voice) | zenodo.org/records/4618287 | CC BY-NC-SA 4.0 | Zenodo robots.txt and record terms: not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | Choral Singing Dataset (Cuesta et al.) | zenodo.org/records/2649950 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | ESMUC Choir Dataset | zenodo.org/records/5848990 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | Cantoría (SATB + organ) | zenodo.org/records/5878677 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+
+## Tier 1 sources for Transkun (real recordings with note labels, checked 2026-11-19)
+
+Licences from the Zenodo / Dryad record pages (a subagent's check, primary pages only).
+Commercial-OK: vocadito (CC BY 4.0, 40 solo singing excerpts, notes by two annotators),
+GuitarSet 1.1.0 (CC BY 4.0, hexaphonic pickup labels), URMP (CC0, Dryad), MusicNet (CC BY 4.0
+on the Zenodo record; labels are score-to-audio DTW, ~4% error claimed).
+NC (NC policy above): Dagstuhl ChoirSet, Choral Singing Dataset, ESMUC, Cantoría.
+Not usable as is: MusicNetEM labels (README: "provided for non-commercial use only",
+a separate licence from the author is needed, so treat as NC at most; no LICENSE file),
+SingStyle111 (application for non-commercial research only, no third-party sharing),
+Children's Song Dataset (CC BY-NC-SA, research only), GTSinger and M4Singer (CC BY-NC-SA),
+MIR-ST500 (no licence, YouTube audio). Unverified: Bach10.
+Every tier-1 source still passes the listening gate in docs/TRANSKUN_PLAN.md before training.
 
 ## Policy update, 2026-11-12 (owner's decision)
 

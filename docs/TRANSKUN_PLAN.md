@@ -55,10 +55,12 @@ there (flags, log, no redistribution, delete raw copies after training).
 | Source | Content | License (status) |
 |---|---|---|
 | MusicNet + MusicNetEM labels | ~330 classical recordings, ~34 h: piano, chamber, orchestra | EM labels CC BY 4.0 (Zenodo). Audio: authors say public-domain recordings; **verify on the original site** |
-| Dagstuhl ChoirSet | Real choir multitracks with score MIDI and F0 | CC BY 4.0 (TISMIR article, mirdata). Verify the note alignment |
+| Dagstuhl ChoirSet | Real choir multitracks with score MIDI and F0 | Data: CC BY-NC-SA 4.0 (Zenodo 4618287; the CC BY 4.0 is the article's). NC policy. Verify the note alignment |
 | GuitarSet | Real guitar, note annotations from a hexaphonic pickup (~3 h) | **Verify** (Zenodo record / GitHub). Guitar matters for this project |
 | URMP | 44 chamber pieces, mixes + MIDI scores | No license found yet (Dryad doi:10.5061/dryad.ng3r749). **Verify**; if research-only, treat as NC |
 | Bach10 | 10 Bach chorales, quartet recordings + MIDI | Unclear; a derivative is CC BY-NC-SA 3.0. **Verify**, else treat as NC |
+| vocadito | 40 solo singing excerpts, 7 languages, notes by 2 annotators | CC BY 4.0 (Zenodo 5578807). **Real voice**, tiny |
+| Choral Singing Dataset, ESMUC Choir, Cantoría | real choir / SATB quartet (+ organ) per-singer recordings with F0 and notes | CC BY-NC 4.0, NC policy (log in MODEL_LICENSES.md). **Real voice** |
 | ~~PDMX organ, real recordings~~ | **Excluded (2026-11-19).** 19 organ recordings DTW-aligned to scores: listening showed the alignment breaks the rhythm and flow, which would teach wrong onsets | — |
 
 **Gate for every tier-1 source:** labels made by aligning a score to a recording (DTW etc.) are
@@ -94,6 +96,12 @@ About 45% of training segments *(target)*.
 | Band with drums (march, ragtime, big band, rock remixes of PD pieces) | MIDI with a drum track | to do (5 examples rendered in Downloads/pianocover_multiinstrument_perkusja) |
 | Piano solo | PDMX piano scores | to do, with several piano soundfonts (YDP, UprightPianoKW), so synthetic piano is not "the GM piano" |
 | Guitar (classical) | GM 24-25 | to do, small |
+| **Vocal** (solo song + accompaniment, SATB choir + organ / piano / orchestra) | PDMX `has_lyrics`, tracks named Voice / Soprano / Alto / Tenor / Bass ... (987 candidates after the PD filters, `/data/meta/vocal_candidates.pkl`) | `scripts/vocal_synth.py` written 2026-11-19: vocal lines sung by SoulX-Singer (Apache-2.0, score control: the model makes its own vibrato and slides), accompaniment by fluidsynth; words from PD texts laid onto the notes. **Not run yet** (blocked by a permission prompt). Then 5 samples to listen to: Amazing Grace (40679), Ave Verum / organ (190160), Gute Nacht (204049), Handel Eternal Source (234565), Lacrymosa SATB + piano (227929) |
+
+GM soundfont "Choir Aahs" (52-54) is the only voice in the first renders and sounds nothing
+like singing, so the vocal family replaces it with neural singing. Risks: sung pitch drifts
+from the score (scoops, vibrato), so the target is the score note; voice timbres are only the
+5 example prompts of the SoulX repo (open item in MODEL_LICENSES.md).
 
 Rendering, per render and seeded, all recorded in meta.csv:
 - soundfont: GeneralUser GS, FluidR3_GM (MIT), TimGM6mb (GPL-2; audio only, never shipped),
@@ -132,6 +140,11 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    ≥ 0.95. Fail → larger config or a different architecture, before collecting more data.
 3. **Tier 1 download + licence check:** MusicNet(+EM), Dagstuhl, GuitarSet, URMP, Bach10.
    Licence rows go in MODEL_LICENSES.md; NC ones in the NC log. Convert to the same pickle.
+   **Started 2026-11-19:** licences checked; `scripts/tier1_download.py` fetches the Zenodo
+   sources into /data/tier1/<source>/raw (vocadito, GuitarSet annotations + mono mic,
+   Dagstuhl, CSD, ESMUC, Cantoría, MusicNet; all downloaded, md5 checked, about 21 GB).
+   URMP (Dryad) not added yet. Next: converters,
+   then the listening gate (3-5 control files per source).
 4. **Tier 2:** piano replay pickle from /data/ds_all (audio + `cover_events`).
    **Backup before training (ask the owner first, do not start without an explicit yes):** copy
    the repo and **only what the Transkun training needs**, not the whole volume, to the USB
@@ -237,7 +250,10 @@ Downloads/pianocover_perkusja_test, variants 2-5b, listened to by the owner):
 
 ## Open items
 
-- Verify licences: MusicNet audio, GuitarSet, URMP, Bach10, VSCO-2/VSCL, MuseScore_General;
+- "Fortepian przeciw zapominaniu" (owner's request, 2026-11-19): to add to the dataset; not found
+  on the web under that name, link / source needed from the owner.
+- Verify licences: Bach10, VSCO-2/VSCL, MuseScore_General (MusicNet, GuitarSet, URMP done
+  2026-11-19);
   confirm the Transkun 2.0 weights licence with the author.
 - Decide on MAESTRO (NC policy) vs piano replay only.
 - The AMT-APC organ 1:1 fine-tune (/data/runs/apc_organ11, 2026-11-18) is a separate
