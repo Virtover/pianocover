@@ -17,7 +17,8 @@ license stated on the weights themselves.
 | BTC (ISMIR 2019) | chords (correction only) | MIT | Not stated | Isophonics, Robbie Williams, UsPop2002 labels | 2026-11-09 | github.com/jayg996/BTC-ISMIR19 |
 | torchcrepe 0.0.24 (CREPE `full`) | vocal melody + bass line (f0 -> notes) | MIT (Copyright 2020 Max Morrison) | Bundled in the package (`torchcrepe/assets/full.pth`); README: "converted [from marl/crepe] using MMdnn". No separate weights license stated. Upstream marl/crepe is MIT and bundles its pretrained model in the MIT package. | MIR-1K, Bach10, RWC-Synth, MedleyDB, MDB-STEM-Synth, NSynth | 2026-11-10 | github.com/maxrmorrison/torchcrepe (LICENSE, README, setup.py), github.com/marl/crepe |
 | SoulX-Singer (`model.pt`, 2.8 GB, repo commit 81aeb3a) | singing voice for synthetic training audio (`scripts/vocal_synth.py`); not shipped | Apache-2.0 (LICENSE file) | Apache-2.0 (README: "free to use the codes and model weights"; HF card tag apache-2.0). Disclaimer: no impersonation without authorisation, no deceptive audio | >42 k h of vocals, not named | 2026-11-19 | github.com/Soul-AILab/SoulX-Singer, huggingface.co/Soul-AILab/SoulX-Singer |
-| SoulX-Singer example prompts (`example/audio/{en,zh}_prompt`, `{en,zh,yue}_target`) | the 5 voice timbres the model clones | in the Apache-2.0 repo | n/a | singers not named; provenance not stated | 2026-11-19 | same repo. Open item: ask the authors whether these voices may be used, or replace them with CC BY / CC0 singing (vocadito) |
+| SoulX-Singer example prompts (`example/audio/{en,zh}_prompt`, `{en,zh,yue}_target`) | the 5 voice timbres the model clones | in the Apache-2.0 repo | n/a | singers not named; provenance not stated | 2026-11-19 | same repo. README states Apache-2.0 for "the codes and model weights" only; the audio is not mentioned. **Not used for training** (owner, 2026-11-21: vocadito prompts instead, next row). Used only for the 5 test samples of 2026-11-20 |
+| vocadito voice prompts (`scripts/vocadito_prompts.py`, `/data/ext/vocadito_prompts`, 8 singers) | voice timbres for SoulX-Singer instead of the repo examples | CC BY 4.0 (Zenodo 5578807, vocadito) | n/a | vocadito tracks 6, 12, 14, 15, 18, 19, 22, 38 (English singers S5, S9, S11, S12, S13, S14, S17, S29), one 3-4.4 s phrase each; words laid on annotator-1 notes | 2026-11-20 | attribution: Bittner et al., vocadito, Zenodo 10.5281/zenodo.5578807. Not redistributed |
 
 | onnxruntime-gpu 1.22.0 | runtime for basic-pitch | MIT | n/a | n/a | 2026-11-09 | PyPI metadata |
 
@@ -81,10 +82,10 @@ societies have reserved their rights; lawful access is doubtful).
 ### NC source log
 | Date | Dataset | Official source | License | Reservation check | Used for |
 |---|---|---|---|---|---|
-| 2026-11-19 | Dagstuhl ChoirSet (choir, real voice) | zenodo.org/records/4618287 | CC BY-NC-SA 4.0 | Zenodo robots.txt and record terms: not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
-| 2026-11-19 | Choral Singing Dataset (Cuesta et al.) | zenodo.org/records/2649950 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
-| 2026-11-19 | ESMUC Choir Dataset | zenodo.org/records/5848990 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
-| 2026-11-19 | Cantoría (SATB + organ) | zenodo.org/records/5878677 | CC BY-NC 4.0 | not checked yet | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | Dagstuhl ChoirSet (choir, real voice) | zenodo.org/records/4618287 | CC BY-NC-SA 4.0 | 2026-11-20: none. Zenodo robots.txt has no AI/TDM rules (only `*`, /records allowed), tdmrep.json and ai.txt 404, Terms v1.3 / Policies: "respect applicable license conditions" only; record page and in-zip README add no terms | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | Choral Singing Dataset (Cuesta et al.) | zenodo.org/records/2649950 | CC BY-NC 4.0 | 2026-11-20: none (same Zenodo checks; record page and in-zip README add no terms) | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | ESMUC Choir Dataset | zenodo.org/records/5848990 | CC BY-NC 4.0 | 2026-11-20: none (same Zenodo checks; record page and in-zip README add no terms) | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
+| 2026-11-19 | Cantoría (SATB + organ) | zenodo.org/records/5878677 | CC BY-NC 4.0 | 2026-11-20: none (same Zenodo checks; record page and in-zip README add no terms) | Transkun tier 1 (downloaded 2026-11-19, gate pending) |
 
 ## Tier 1 sources for Transkun (real recordings with note labels, checked 2026-11-19)
 

@@ -46,6 +46,21 @@ SWAP = [list(range(0, 2)), [4, 5], list(range(16, 21)), [24, 25], [26, 27], list
         [40, 41, 42, 43, 44, 45, 48, 49], [52, 53], list(range(56, 62)), list(range(64, 72)),
         list(range(72, 76))]
 SWAP_OF = {p: g for g in SWAP for p in g}
+# rough playable range (MIDI) of the orchestral members: a swap only picks a member whose range
+# covers the track's 5th-95th percentile pitch (no trumpet line on a tuba, no violin on a bass)
+RANGE = {40: (55, 100), 41: (48, 88), 42: (36, 76), 43: (28, 60), 56: (54, 84), 57: (40, 72), 58: (28, 58),
+         59: (54, 84), 60: (41, 77), 61: (36, 84), 64: (56, 88), 65: (49, 81), 66: (44, 76), 67: (36, 69),
+         68: (58, 91), 69: (52, 81), 70: (34, 75), 71: (50, 94), 72: (74, 108), 73: (60, 96), 74: (60, 96),
+         75: (60, 96)}
+
+
+def swap_choices(inst):
+    """Members of inst's swap group that can play its line (the original program always can)."""
+    if not inst.notes:
+        return SWAP_OF[inst.program]
+    lo, hi = np.percentile([n.pitch for n in inst.notes], [5, 95])
+    ok = [p for p in SWAP_OF[inst.program] if p not in RANGE or (RANGE[p][0] <= lo and hi <= RANGE[p][1])]
+    return ok if inst.program in ok else ok + [inst.program]
 
 
 def family(prog_set, has_drum):
@@ -157,7 +172,7 @@ def audio_midi(midi_bytes, fam, rng):
         if not has7:
             inst.control_changes.insert(0, pretty_midi.ControlChange(7, int(127 * gain), 0.0))
         if not inst.is_drum and inst.program in SWAP_OF and rng.random() < 0.6:
-            inst.program = rng.choice(SWAP_OF[inst.program])
+            inst.program = rng.choice(swap_choices(inst))
         cfg["programs"].append(f"drums{kit}" if inst.is_drum else inst.program)
     if fam == "organ":  # extra ranks in the audio only: harmonics the model must not report
         r = rng.random()

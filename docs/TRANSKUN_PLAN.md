@@ -80,6 +80,14 @@ Held-out pieces from each go to the test set (split by piece, never by excerpt).
   it keeps the current piano behaviour on exactly the kind of audio users upload.
 - Optional: MAESTRO v3 (CC BY-NC-SA 4.0, ~200 h, real labels) under the NC policy.
 - About 25% of training segments *(target)*.
+- **Built 2026-11-20** (`scripts/piano_replay.py`; the owner calls it "fortepian przeciw
+  zapominaniu"): /data/piano_replay/piano, real piano covers only (/data/raw, organ_pilot,
+  organ_partial; pdmx_organ excluded, its covers are renders), 16-bit WAV + Transkun pickles
+  with notes and pedals (-64 / -67), split as in ds_all: 2410 train (161.4 h) + 76 val
+  (4.9 h), 49.3 GB. **WAVs deleted 2026-11-21** to free disk (pickles and meta.csv kept); they
+  are rebuilt from /data/raw/cover etc. by re-running the script (ffmpeg decode, same image). Far more than the 25% share needs; sample it in training. Note: transkun 2.0.1
+  `DatasetMaestro.sampleSlice` unpacks `fetchData` wrongly (3 values, expects 2); `fetchData`
+  itself works on this set.
 
 ### Tier 3: synthetic renders of public-domain scores (scale and variety)
 
@@ -96,12 +104,12 @@ About 45% of training segments *(target)*.
 | Band with drums (march, ragtime, big band, rock remixes of PD pieces) | MIDI with a drum track | to do (5 examples rendered in Downloads/pianocover_multiinstrument_perkusja) |
 | Piano solo | PDMX piano scores | to do, with several piano soundfonts (YDP, UprightPianoKW), so synthetic piano is not "the GM piano" |
 | Guitar (classical) | GM 24-25 | to do, small |
-| **Vocal** (solo song + accompaniment, SATB choir + organ / piano / orchestra) | PDMX `has_lyrics`, tracks named Voice / Soprano / Alto / Tenor / Bass ... (987 candidates after the PD filters, `/data/meta/vocal_candidates.pkl`) | `scripts/vocal_synth.py` written 2026-11-19: vocal lines sung by SoulX-Singer (Apache-2.0, score control: the model makes its own vibrato and slides), accompaniment by fluidsynth; words from PD texts laid onto the notes. **Not run yet** (blocked by a permission prompt). Then 5 samples to listen to: Amazing Grace (40679), Ave Verum / organ (190160), Gute Nacht (204049), Handel Eternal Source (234565), Lacrymosa SATB + piano (227929) |
+| **Vocal** (solo song + accompaniment, SATB choir + organ / piano / orchestra) | PDMX `has_lyrics`, tracks named Voice / Soprano / Alto / Tenor / Bass ... (987 candidates after the PD filters, `/data/meta/vocal_candidates.pkl`) | `scripts/vocal_synth.py` written 2026-11-19: vocal lines sung by SoulX-Singer (Apache-2.0, score control: the model makes its own vibrato and slides), accompaniment by fluidsynth; words from PD texts laid onto the notes. **5 samples rendered 2026-11-20** (Downloads/pianocover_vocal_samples: mix, control file, target MIDI; runs offline in `pianocover:voice`, weights loaded with `weights_only=True`): Amazing Grace (40679), Ave Verum / organ (190160), Gute Nacht (204049), Handel Eternal Source (234565), Lacrymosa SATB + piano (227929); owner: "sounds fine". **Changes 2026-11-21:** voices from vocadito (`scripts/vocadito_prompts.py`, 8 English singers, CC BY; owner OK), a solo line is transposed toward its voice; 70% of renders drop accompaniment notes that double the voice (same onset ±50 ms, same pitch or octave; `--undouble-p`), since many scores double the melody in the piano; score_synth swaps only to instruments whose range covers the line (no trumpet part on a tuba). Next: samples after the fixes, then the full run |
 
 GM soundfont "Choir Aahs" (52-54) is the only voice in the first renders and sounds nothing
 like singing, so the vocal family replaces it with neural singing. Risks: sung pitch drifts
-from the score (scoops, vibrato), so the target is the score note; voice timbres are only the
-5 example prompts of the SoulX repo (open item in MODEL_LICENSES.md).
+from the score (scoops, vibrato), so the target is the score note; voice timbres are only 8
+short vocadito phrases (amateur recordings), so voice variety is limited.
 
 Rendering, per render and seeded, all recorded in meta.csv:
 - soundfont: GeneralUser GS, FluidR3_GM (MIT), TimGM6mb (GPL-2; audio only, never shipped),
@@ -122,9 +130,14 @@ Output format (Transkun's DatasetMaestro): `<root>/<source>/<id>.flac` at 44.1 k
 pickle list of `{"audio_filename", "duration", "fs", "nSamples", "nChannel", "notes"
 (transkun.Data.Note list), "source", "split"}`. Audio must be **16-bit PCM WAV**:
 `readAudioSlice` uses `scipy.io.wavfile` with mmap and integer normalisation (checked in
-transkun 2.0.1). Mono 44.1 kHz is about 0.32 GB per hour, so 100 h is about 32 GB; the Docker
-disk lives on C:, which had 153 GB free on 2026-11-18. Keep FLAC copies off the training path
-only if needed for backups.
+transkun 2.0.1). Mono 44.1 kHz is about 0.32 GB per hour, so 100 h is about 32 GB. The Docker
+disk is **D:\DockerDisk\DockerDesktopWSL\disk\docker_data.vhdx** (not C:; not sparse, so it
+never shrinks by itself). On 2026-11-20 it reached 205 GB and filled D: (13 MB free): I/O
+errors, Docker hung. Cleanup on 2026-11-21 (owner's go): old AMT-APC data that is in the F:
+backup, unpacked tier-1 folders, test renders and the piano replay WAVs removed; volume 185 →
+113 GB used, so about 90 GB is free inside the file before it grows again. Check `df -h /d` and
+the volume before every large write. Transport to the 5070 machine: FLAC on the USB drive,
+unpacked to 16-bit WAV there.
 
 Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimate)*.
 

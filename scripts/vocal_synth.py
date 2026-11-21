@@ -43,6 +43,7 @@ VOX = re.compile(r"(?i)\b(voice|vocal|voix|stimme|singstimme|soprano|sopran|alto
 # example prompts shipped in the SoulX-Singer repo (audio + metadata); median MIDI pitch
 PROMPTS = {"en_prompt": 65, "zh_prompt": 67, "en_target": 65, "zh_target": 53, "yue_target": 57}
 SVS_SR = 24000
+UNDOUBLE_P = 0.7  # share of renders whose accompaniment loses the notes doubling the voice
 # public-domain English texts (authors died before 1900; KJV 1611)
 TEXTS = """
 Amazing grace how sweet the sound that saved a wretch like me I once was lost but now am found
@@ -156,6 +157,15 @@ def line_meta(line, lyrics, language="English", max_seg=12.0, gap=0.3):
     return out
 
 
+def load_wav_ffmpeg(path, sample_rate):
+    """Mono float waveform (1, T) at sample_rate, decoded by ffmpeg."""
+    import torch
+
+    raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar",
+                          str(sample_rate), "-f", "f32le", "-"], check=True, capture_output=True).stdout
+    return torch.from_numpy(np.frombuffer(raw, dtype=np.float32).copy()).unsqueeze(0)
+
+
 class Singer:
     def __init__(self, soulx, device="cuda"):
         import torch
@@ -165,6 +175,9 @@ class Singer:
         from soulxsinger.utils.data_processor import DataProcessor
         from soulxsinger.utils.file_utils import load_config
 
+        import soulxsinger.utils.data_processor as dpm
+
+        dpm.load_wav = load_wav_ffmpeg  # torchaudio 2.9 needs torchcodec for load(); not installed
         self.root = Path(soulx)
         self.cfg = load_config(str(self.root / "soulxsinger/config/soulxsinger.yaml"))
         # weights_only=True: the checkpoint is downloaded, so no arbitrary pickle code is run
@@ -177,12 +190,17 @@ class Singer:
         self.dp = DataProcessor(self.cfg.audio.hop_size, self.cfg.audio.sample_rate,
                                 str(self.root / "soulxsinger/utils/phoneme/phone_set.json"), device)
         self.prompts = {}
+        self.prompt_dir = None  # None: SoulX repo examples; else a vocadito_prompts.py output dir
 
     def prompt(self, name):
         if name not in self.prompts:
-            d = self.root / "example/audio"
+            if self.prompt_dir:
+                d, audio = Path(self.prompt_dir), Path(self.prompt_dir) / f"{name}.wav"
+            else:
+                d = self.root / "example/audio"
+                audio = d / f"{name}.mp3"
             meta = json.load(open(d / f"{name}.json", encoding="utf8"))[0]
-            self.prompts[name] = self.dp.process(meta, str(d / f"{name}.mp3"))
+            self.prompts[name] = self.dp.process(meta, str(audio))
         return self.prompts[name]
 
     def sing(self, metas, prompt, total_s, seed):
@@ -269,9 +287,11 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     if not vox:
         return None
     lines = [mono_line(i.notes) for i in vox]
-    # one transposition for the whole piece, so the top line sits near a female prompt's range
+    # one transposition for the whole piece; a solo line moves toward its (randomly chosen) voice
     allp = [n[2] for ln in lines for n in ln]
-    shift = int(np.clip(round(65 - np.median([n[2] for n in lines[0]])), -5, 5)) + rng.randint(-2, 2)
+    solo_prompt = rng.choice(sorted(PROMPTS))
+    shift = int(np.clip(round(PROMPTS[solo_prompt] - np.median([n[2] for n in lines[0]])), -7, 7)) \
+        + rng.randint(-2, 2)
     if len(lines) > 1:  # choir: keep the original key area
         shift = rng.randint(-2, 2)
     shift = int(np.clip(shift, 21 - min(allp), 108 - max(allp)))
@@ -279,6 +299,29 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     # accompaniment: everything that is not a vocal track, rendered like score_synth
     for i in vox:
         pm.instruments.remove(i)
+    # scores often double the voice in the accompaniment (hymn right hand, choir reduction); then
+    # the melody is heard from the piano too and the model need not read the voice. Most renders
+    # drop the doubling notes (same onset, same pitch or octave) from audio and target alike.
+    undoubled = 0
+    if rng.random() < UNDOUBLE_P:
+        von = {}
+        for ln in lines:
+            for s, e, p in ln:
+                von.setdefault(p, []).append(s)
+        von = {p: np.array(v) for p, v in von.items()}
+
+        def doubles(n):
+            for p in (n.pitch, n.pitch - 12, n.pitch + 12):
+                if p in von and np.abs(von[p] - n.start).min() < 0.05:
+                    return True
+            return False
+
+        for inst in pm.instruments:
+            if inst.is_drum:
+                continue
+            keep = [n for n in inst.notes if not doubles(n)]
+            undoubled += len(inst.notes) - len(keep)
+            inst.notes = keep
     for inst in pm.instruments:
         if not inst.is_drum:
             for n in inst.notes:
@@ -286,6 +329,13 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     buf = io.BytesIO()
     pm.write(buf)
     apm, cfg = audio_midi(buf.getvalue(), "chamber", rng)
+    if undoubled:  # check: the rendered accompaniment no longer doubles the voice
+        left = 0
+        for i in apm.instruments:
+            for n in i.notes:
+                if not i.is_drum and doubles(pretty_midi.Note(n.velocity, n.pitch - shift, n.start, n.end)):
+                    left += 1
+        print("undoubled", undoubled, "doubling notes left in rendered accompaniment:", left, flush=True)
     total = max([n[1] for ln in lines for n in ln] + [apm.get_end_time()]) + 1.0
     used = []
     voices = []
@@ -305,7 +355,7 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
             med = np.median([n[2] for n in ln])
             pool = [p for p, m in PROMPTS.items() if abs(m - med) <= 7 and p not in used] or \
                    sorted(PROMPTS, key=lambda p: abs(PROMPTS[p] - med))[:2]
-            prompt = rng.choice(pool)
+            prompt = solo_prompt if len(lines) == 1 else rng.choice(sorted(pool))
             used.append(prompt)
             metas = line_meta(ln, lyr)
             y = resample(singer.sing(metas, prompt, total, rng.randrange(2**31)), SVS_SR, FS)[:n_out]
@@ -316,7 +366,15 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
             voices.append({"prompt": prompt, "n": len(ln), "notes": ln})
         # solo voice sits 0..+8 dB over the accompaniment; a choir 0..+4 dB in total
         lead = rng.uniform(0, 8) if len(lines) == 1 else rng.uniform(-2, 4)
-        mix += vox_sum / rms(vox_sum) * acc_rms * 10 ** (lead / 20)
+        vox_mixed = vox_sum / rms(vox_sum) * acc_rms * 10 ** (lead / 20)
+        if listen:  # stems for checking by ear: accompaniment alone, voices alone
+            for tag, sig in (("acc", mix), ("vox", vox_mixed)):
+                wavfile.write(td / f"{tag}.wav", FS, (sig / max(np.abs(sig).max(), 1e-6) * 0.9).astype(np.float32))
+                Path(listen).mkdir(parents=True, exist_ok=True)
+                name = re.sub(r"[^\w\-]+", "_", str(row["title"]))[:50]
+                subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(td / f"{tag}.wav"), "-b:a",
+                                "160k", str(Path(listen) / f"{name}_{rid}_stem_{tag}.mp3")], check=True)
+        mix += vox_mixed
         wavfile.write(td / "mix.wav", FS, (mix / max(np.abs(mix).max(), 1e-6) * 0.9).astype(np.float32))
         src = td / "mix.wav"
         mp3 = rng.random() < 0.3
@@ -345,7 +403,7 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     ev = ev[ev[:, 0] < dur]
     meta = {"soundfont": Path(sf2).name, "room": room, "mp3": int(mp3), "programs": " ".join(map(str, cfg["programs"])),
             "shift": shift, "voices": " ".join(f"{v['prompt']}:{v['n']}" for v in voices), "vocal_ir_rt60": round(rt, 2),
-            "vocal_wet": round(wet, 2), "lead_db": round(lead, 1)}
+            "vocal_wet": round(wet, 2), "lead_db": round(lead, 1), "undoubled": undoubled}
     if listen:
         write_listen(Path(listen), rid, row, wav, ev, sf2)
     return {"fam": "vocal", "id": rid, "notes": ev, "duration": dur, "nSamples": len(x), "meta": meta}
@@ -373,59 +431,133 @@ def write_listen(d, rid, row, wav, ev, sf2):
                         "-b:a", "192k", str(d / f"{name}_{rid}_control.mp3")], check=True)
 
 
+# content filter (owner's rules: no occult / witches / glorified ghosts or death figures);
+# sacred texts with "Spirit" or "Tod" stay
+BAD_TITLE = re.compile(r"(?i)witch|sorceress|wayward sisters|vaulted cell|our next motion|destruction's our delight|"
+                       r"harm's our delight|ere we this perform|spirit aeneas|\bho ho ho\b|hexe|erlk[öo]nig|"
+                       r"der tod und? das|devil|satan|teufel|demon|dämon|lucifer|ghost|zombie|vampir|idol")
+# PD composers missing from organ_synth.OLD that the vocal candidates need (all died before 1700
+# or 1900); DA2017 = Purcell, Dido and Aeneas; a bare BWV number = Bach
+OLD_EXTRA = re.compile(r"(?i)dowland|weelkes|\barne\b|w\. ?h\. monk|william henry monk|\bbwv ?\d|^da2017")
+
+
+def candidates(path):
+    """PDMX row indices of the vocal candidates that pass the PD-composer and content filters."""
+    from organ_synth import MODERN, OLD
+
+    keep, drop = [], []
+    for r in pickle.load(open(path, "rb")):  # (views, pdmx_row, title, composer, kind, vox, acc, secs)
+        text = f"{r[3]} {r[2]}"
+        pd_ok = (OLD.search(text) or OLD_EXTRA.search(str(r[2]))) and not MODERN.search(text)
+        (keep if pd_ok and not BAD_TITLE.search(str(r[2])) else drop).append(r)
+    return [r[1] for r in keep], drop
+
+
+def finalize(out, rows_meta):
+    """meta.csv and the transkun pickles from all per-piece records in <out>/vocal/items."""
+    recs = []
+    for f in sorted((out / "vocal" / "items").glob("*.pkl")):
+        recs.append(pickle.load(open(f, "rb")))
+    if not recs:
+        return 0
+    with open(out / "vocal" / "meta.csv.tmp", "w", newline="", encoding="utf8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "split", "pdmx_row", "title", "composer", "license", "pdmx_mid", "duration", "nSamples",
+                    *recs[0]["meta"].keys()])
+        for r in recs:
+            w.writerow([r["id"], r["split"], r["pdmx_row"], r["row"]["title"], r["row"]["composer_name"],
+                        r["row"]["license"], r["row"]["mid"], round(r["duration"], 2), r["nSamples"],
+                        *r["meta"].values()])
+    os.replace(out / "vocal" / "meta.csv.tmp", out / "vocal" / "meta.csv")
+    for split in ("train", "val"):
+        items = [{"audio_filename": f"vocal/{r['id']}.wav", "duration": r["duration"], "fs": FS,
+                  "nSamples": r["nSamples"], "nChannel": 1, "notes": to_transkun(r["notes"]), "source": "vocal",
+                  "split": split} for r in recs if r["split"] == split]
+        pickle.dump(items, open(out / "vocal" / f"{split}.pickle.tmp", "wb"))
+        os.replace(out / "vocal" / f"{split}.pickle.tmp", out / "vocal" / f"{split}.pickle")
+    return len(recs)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdmx", default="/data/pdmx")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--ids", required=True, help="comma-separated PDMX.csv row indices")
+    ap.add_argument("--ids", help="comma-separated PDMX.csv row indices")
+    ap.add_argument("--candidates", help="vocal_candidates.pkl: render all that pass the filters (resumable)")
     ap.add_argument("--sf2", nargs="+", required=True)
     ap.add_argument("--soulx", default="/data/ext/soulx")
+    ap.add_argument("--prompts", help="vocadito_prompts.py output dir (default: SoulX repo example prompts)")
+    ap.add_argument("--undouble-p", type=float, default=0.7, help="share of renders without voice doubling")
     ap.add_argument("--listen")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-every", type=int, default=20)
+    ap.add_argument("--max-vram-gb", type=float, default=6.0)
+    ap.add_argument("--max-tries", type=int, default=3, help="skip a piece after this many failed starts")
     args = ap.parse_args()
 
     import pandas as pd
     import torch
 
-    torch.cuda.set_per_process_memory_fraction(0.6)
-    df = pd.read_csv(Path(args.pdmx) / "PDMX.csv", low_memory=False)
-    ids = [int(x) for x in args.ids.split(",")]
-    rows = {i: dict(df.loc[i], _id=Path(df.loc[i, "mid"]).stem[:24]) for i in ids}
-    want = {rows[i]["mid"].lstrip("./"): i for i in ids}
-    mids = {}
-    with tarfile.open(Path(args.pdmx) / "mid.tar.gz") as tar:
-        for m in tar:
-            if m.isfile() and m.name.lstrip("./") in want:
-                mids[want[m.name.lstrip("./")]] = tar.extractfile(m).read()
-    singer = Singer(args.soulx)
+    total = torch.cuda.get_device_properties(0).total_memory
+    torch.cuda.set_per_process_memory_fraction(min(1.0, args.max_vram_gb * 2**30 / total))
     out = Path(args.out)
+    if args.candidates:
+        ids, drop = candidates(args.candidates)
+        print(len(ids), "candidates pass the filters,", len(drop), "dropped", flush=True)
+    else:
+        ids = [int(x) for x in args.ids.split(",")]
+    # seeds, sound fonts and splits are fixed per position before anything is skipped, so a
+    # resumed run renders exactly what an uninterrupted one would
     rng = random.Random(args.seed)
-    results = []
-    for k, i in enumerate(ids):
-        seed = rng.randrange(2**31)
-        r = work(rows[i], mids[i], singer, rng.choice(args.sf2), seed, out, args.listen)
-        if r:
+    plan = [(k, i, rng.randrange(2**31), rng.choice(args.sf2)) for k, i in enumerate(ids)]
+    items, tries = out / "vocal" / "items", out / "vocal" / "tries"
+    items.mkdir(parents=True, exist_ok=True)
+    tries.mkdir(parents=True, exist_ok=True)
+    todo = []
+    for k, i, seed, sf2 in plan:
+        if (items / f"{i}.pkl").exists() or (items / f"{i}.none").exists():
+            continue
+        t = tries / f"{i}.n"
+        n = int(t.read_text()) if t.exists() else 0
+        if n >= args.max_tries:
+            continue
+        todo.append((k, i, seed, sf2))
+    print(len(plan) - len(todo), "of", len(plan), "already done or skipped;", len(todo), "to render", flush=True)
+    if todo:
+        df = pd.read_csv(Path(args.pdmx) / "PDMX.csv", low_memory=False)
+        rows = {i: dict(df.loc[i], _id=Path(df.loc[i, "mid"]).stem[:24]) for _, i, _, _ in todo}
+        want = {rows[i]["mid"].lstrip("./"): i for i in rows}
+        mids = {}
+        with tarfile.open(Path(args.pdmx) / "mid.tar.gz") as tar:
+            for m in tar:
+                if m.isfile() and m.name.lstrip("./") in want:
+                    mids[want[m.name.lstrip("./")]] = tar.extractfile(m).read()
+        global UNDOUBLE_P
+        UNDOUBLE_P = args.undouble_p
+        singer = Singer(args.soulx)
+        if args.prompts:
+            PROMPTS.clear()
+            PROMPTS.update(json.load(open(Path(args.prompts) / "prompts.json")))
+            singer.prompt_dir = args.prompts
+        for n_done, (k, i, seed, sf2) in enumerate(todo):
+            # count the attempt before starting: a crash, a CUDA error after hibernation or a
+            # kill all leave it counted, so a piece that always fails is skipped eventually
+            t = tries / f"{i}.n"
+            t.write_text(str((int(t.read_text()) if t.exists() else 0) + 1))
+            r = work(rows[i], mids[i], singer, sf2, seed, out, args.listen) if i in mids else None
+            if r is None:
+                (items / f"{i}.none").write_text("no vocal line / no midi")
+                continue
             r["split"] = "val" if k % args.val_every == args.val_every - 1 else "train"
-            r["row"] = rows[i]
-            results.append(r)
-            print("done", i, rows[i]["title"], r["meta"], flush=True)
-    with open(out / "vocal" / "meta.csv", "a", newline="", encoding="utf8") as f:
-        w = csv.writer(f)
-        if f.tell() == 0:
-            w.writerow(["id", "split", "title", "composer", "license", "pdmx_mid", "duration", "nSamples",
-                        *results[0]["meta"].keys()])
-        for r in results:
-            w.writerow([r["id"], r["split"], r["row"]["title"], r["row"]["composer_name"], r["row"]["license"],
-                        r["row"]["mid"], round(r["duration"], 2), r["nSamples"], *r["meta"].values()])
-    for split in ("train", "val"):
-        items = [{"audio_filename": f"vocal/{r['id']}.wav", "duration": r["duration"], "fs": FS,
-                  "nSamples": r["nSamples"], "nChannel": 1, "notes": to_transkun(r["notes"]), "source": "vocal",
-                  "split": split} for r in results if r["split"] == split]
-        p = out / "vocal" / f"{split}.pickle"
-        old = pickle.load(open(p, "rb")) if p.exists() else []
-        names = {it["audio_filename"] for it in items}
-        pickle.dump([o for o in old if o["audio_filename"] not in names] + items, open(p, "wb"))
+            r["row"] = {c: rows[i][c] for c in ("title", "composer_name", "license", "mid")}
+            r["pdmx_row"] = i
+            pickle.dump(r, open(items / f"{i}.pkl.tmp", "wb"))
+            os.replace(items / f"{i}.pkl.tmp", items / f"{i}.pkl")
+            print(f"done {n_done + 1}/{len(todo)}", i, rows[i]["title"], r["meta"], flush=True)
+            if (n_done + 1) % 25 == 0:
+                finalize(out, rows)
+    n = finalize(out, None)
+    print("finalized", n, "pieces", flush=True)
 
 
 if __name__ == "__main__":
