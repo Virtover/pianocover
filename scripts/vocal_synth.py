@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import time
 import tempfile
 from pathlib import Path
 
@@ -43,6 +44,7 @@ VOX = re.compile(r"(?i)\b(voice|vocal|voix|stimme|singstimme|soprano|sopran|alto
 # example prompts shipped in the SoulX-Singer repo (audio + metadata); median MIDI pitch
 PROMPTS = {"en_prompt": 65, "zh_prompt": 67, "en_target": 65, "zh_target": 53, "yue_target": 57}
 SVS_SR = 24000
+TIMES = {}  # seconds per stage, for the log
 UNDOUBLE_P = 0.7  # share of renders whose accompaniment loses the notes doubling the voice
 # public-domain English texts (authors died before 1900; KJV 1611)
 TEXTS = """
@@ -167,9 +169,16 @@ def load_wav_ffmpeg(path, sample_rate):
 
 
 class Singer:
-    def __init__(self, soulx, device="cuda"):
+    def __init__(self, soulx, device="cuda", attn="eager"):
         import torch
 
+        if attn == "sdpa":
+            # SoulX builds its Llama layers from bare LlamaConfigs, which select the "eager"
+            # attention (explicit matmul + softmax). SDPA computes the same attention with a
+            # fused kernel; same weights, only fp16 rounding differs.
+            import transformers.models.llama.modeling_llama as ml
+
+            ml.LLAMA_ATTENTION_CLASSES["eager"] = ml.LLAMA_ATTENTION_CLASSES["sdpa"]
         sys.path.insert(0, soulx)
         from soulxsinger.models.soulxsinger import SoulXSinger
         from soulxsinger.utils.data_processor import DataProcessor
@@ -181,11 +190,23 @@ class Singer:
         self.root = Path(soulx)
         self.cfg = load_config(str(self.root / "soulxsinger/config/soulxsinger.yaml"))
         # weights_only=True: the checkpoint is downloaded, so no arbitrary pickle code is run
-        ck = torch.load(self.root / "pretrained_models/SoulX-Singer/model.pt", map_location="cpu", weights_only=True)
+        # mmap: the 2.8 GB checkpoint is paged in from disk instead of copied into RAM (two
+        # workers loading at once otherwise peak at about 6 GB each)
+        ck = torch.load(self.root / "pretrained_models/SoulX-Singer/model.pt", map_location="cpu", weights_only=True,
+                        mmap=True)
         m = SoulXSinger(self.cfg)
         m.load_state_dict(ck["state_dict"], strict=True)
+        del ck
         m = m.half().to(device).eval()
         m.mel.float()
+        import ctypes
+        import gc
+
+        gc.collect()
+        try:  # hand the freed CPU copies of the weights back to the OS
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass
         self.model = m
         self.dp = DataProcessor(self.cfg.audio.hop_size, self.cfg.audio.sample_rate,
                                 str(self.root / "soulxsinger/utils/phoneme/phone_set.json"), device)
@@ -341,7 +362,9 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     voices = []
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
+        t0 = time.perf_counter()
         acc, room = render_acc(apm, sf2, rng, td)
+        TIMES['acc'] = TIMES.get('acc', 0) + time.perf_counter() - t0
         n_out = int(total * FS)
         mix = np.zeros(n_out, dtype=np.float32)
         if acc is not None:
@@ -358,7 +381,9 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
             prompt = solo_prompt if len(lines) == 1 else rng.choice(sorted(pool))
             used.append(prompt)
             metas = line_meta(ln, lyr)
+            t0 = time.perf_counter()
             y = resample(singer.sing(metas, prompt, total, rng.randrange(2**31)), SVS_SR, FS)[:n_out]
+            TIMES['sing'] = TIMES.get('sing', 0) + time.perf_counter() - t0
             y = np.pad(y, (0, n_out - len(y)))
             y = (1 - wet) * y + wet * fftconvolve(y, ir)[:n_out].astype(np.float32)
             gain_db = rng.uniform(-6, 0) if len(lines) > 1 else 0.0
@@ -493,13 +518,40 @@ def main():
     ap.add_argument("--val-every", type=int, default=20)
     ap.add_argument("--max-vram-gb", type=float, default=6.0)
     ap.add_argument("--max-tries", type=int, default=3, help="skip a piece after this many failed starts")
+    ap.add_argument("--attn", choices=["eager", "sdpa"], default="eager")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="processes sharing the GPU (each gets max-vram-gb / workers); pieces are split by position")
+    ap.add_argument("--shard", type=int, default=-1, help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    # <out>/PAUSE: wait here (before CUDA is touched, so no GPU memory is held); a running
+    # process sees it between pieces and exits with code 3, its wrapper loop restarts it
+    pause = Path(args.out) / "PAUSE"
+    while pause.exists():
+        time.sleep(30)
+
+    if args.workers > 1 and args.shard < 0:
+        # parent: one child per shard, then the final meta.csv / pickles from all records
+        base = [a for a in sys.argv[1:]]
+        procs = []
+        for w in range(args.workers):  # staggered, so the model loads (RAM peaks) do not overlap
+            procs.append(subprocess.Popen([sys.executable, sys.argv[0], *base, "--shard", str(w)]))
+            if w < args.workers - 1:
+                time.sleep(60)
+        codes = [p.wait() for p in procs]
+        if any(codes):
+            sys.exit(3 if 3 in codes else 1)
+        print("finalized", finalize(Path(args.out), None), "pieces", flush=True)
+        return
+
+    import resource
 
     import pandas as pd
     import torch
 
     total = torch.cuda.get_device_properties(0).total_memory
-    torch.cuda.set_per_process_memory_fraction(min(1.0, args.max_vram_gb * 2**30 / total))
+    vram = args.max_vram_gb / max(1, args.workers)
+    torch.cuda.set_per_process_memory_fraction(min(1.0, vram * 2**30 / total))
     out = Path(args.out)
     if args.candidates:
         ids, drop = candidates(args.candidates)
@@ -521,7 +573,8 @@ def main():
         n = int(t.read_text()) if t.exists() else 0
         if n >= args.max_tries:
             continue
-        todo.append((k, i, seed, sf2))
+        if args.shard < 0 or k % args.workers == args.shard:
+            todo.append((k, i, seed, sf2))
     print(len(plan) - len(todo), "of", len(plan), "already done or skipped;", len(todo), "to render", flush=True)
     if todo:
         df = pd.read_csv(Path(args.pdmx) / "PDMX.csv", low_memory=False)
@@ -532,9 +585,10 @@ def main():
             for m in tar:
                 if m.isfile() and m.name.lstrip("./") in want:
                     mids[want[m.name.lstrip("./")]] = tar.extractfile(m).read()
+        del df
         global UNDOUBLE_P
         UNDOUBLE_P = args.undouble_p
-        singer = Singer(args.soulx)
+        singer = Singer(args.soulx, attn=args.attn)
         if args.prompts:
             PROMPTS.clear()
             PROMPTS.update(json.load(open(Path(args.prompts) / "prompts.json")))
@@ -544,6 +598,11 @@ def main():
             # kill all leave it counted, so a piece that always fails is skipped eventually
             t = tries / f"{i}.n"
             t.write_text(str((int(t.read_text()) if t.exists() else 0) + 1))
+            if pause.exists():
+                print("paused", flush=True)
+                sys.exit(3)
+            t0 = time.perf_counter()
+            TIMES.clear()
             r = work(rows[i], mids[i], singer, sf2, seed, out, args.listen) if i in mids else None
             if r is None:
                 (items / f"{i}.none").write_text("no vocal line / no midi")
@@ -554,10 +613,13 @@ def main():
             pickle.dump(r, open(items / f"{i}.pkl.tmp", "wb"))
             os.replace(items / f"{i}.pkl.tmp", items / f"{i}.pkl")
             print(f"done {n_done + 1}/{len(todo)}", i, rows[i]["title"], r["meta"], flush=True)
-            if (n_done + 1) % 25 == 0:
+            print(f"time {time.perf_counter() - t0:.1f}s audio {r['duration']:.1f}s",
+                  " ".join(f"{k}={v:.1f}s" for k, v in TIMES.items()), flush=True)
+            if (n_done + 1) % 25 == 0 and args.shard <= 0:
                 finalize(out, rows)
-    n = finalize(out, None)
-    print("finalized", n, "pieces", flush=True)
+    print("peak RAM", round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2), "GB", flush=True)
+    if args.shard < 0:
+        print("finalized", finalize(out, None), "pieces", flush=True)
 
 
 if __name__ == "__main__":
