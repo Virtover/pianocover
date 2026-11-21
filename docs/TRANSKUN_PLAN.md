@@ -153,7 +153,10 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    ≥ 0.95. Fail → larger config or a different architecture, before collecting more data.
    **Script ready 2026-11-21:** `scripts/tk_capacity.py`. It uses a 2.5 h subset balanced over
    the 7 families (one 60 s segment per piece) and plain Transkun 2.0.pt. The batch size is
-   found automatically under `--max-vram-gb`, with an effective batch of 8. Training stops at
+   found automatically under the VRAM cap, with an effective batch of 8. By the owner's
+   request (2026-11-21), the cap is set to the maximum that does not make the computer stutter:
+   free VRAM at start minus 1 GB, but never below 5 GB. If less than 5 GB is free, the
+   script refuses to start. Training stops at
    F1 0.95 or after 120 training minutes. The run is resumable. Its output is a step-0
    baseline, per-family train F1, and val F1 as a hint. A CPU smoke test passed, including
    resume. Not run on the GPU yet: the vocal render is paused first (PAUSE file).

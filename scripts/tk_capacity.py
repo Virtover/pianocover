@@ -16,7 +16,8 @@ from it (step, optimizer, schedule, used training minutes). The run ends when th
 reaches --target-f1 at an evaluation, or when --max-minutes of training time are used, or at
 --steps. Results: <out>/log.csv, <out>/result.json (pass/fail, per-family F1, peak VRAM).
 
-VRAM: --max-vram-gb caps this process (torch memory fraction). Transkun checkpoints its
+VRAM: --max-vram-gb caps this process (torch memory fraction); by default it is whatever
+is free at start minus a 1 GB reserve for the desktop, so the computer does not stutter. Transkun checkpoints its
 encoder layers in training mode and the backbone runs in bf16 (PianoCoverModel wrapper).
 
 Example (in pianocover:dev, render paused first):
@@ -210,7 +211,12 @@ def main():
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--eval-chunks", type=int, default=42, help="fixed training chunks decoded for onset F1")
     ap.add_argument("--val-chunks", type=int, default=14)
-    ap.add_argument("--max-vram-gb", type=float, default=5.0)
+    ap.add_argument("--max-vram-gb", default="auto",
+                    help="cap for this process; 'auto' = VRAM free at start minus --vram-reserve-gb")
+    ap.add_argument("--vram-reserve-gb", type=float, default=1.0,
+                    help="left free for the desktop and other programs (auto cap only)")
+    ap.add_argument("--min-vram-gb", type=float, default=5.0,
+                    help="the auto cap is never below this (owner's choice); fewer GB free -> refuse to start")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--save-every-min", type=float, default=10.0)
     ap.add_argument("--device", default="cuda")
@@ -221,8 +227,16 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     if device.type == "cuda":
-        total = torch.cuda.get_device_properties(0).total_memory
+        free, total = torch.cuda.mem_get_info()  # after CUDA init: context already counted as used
+        if args.max_vram_gb == "auto":
+            args.max_vram_gb = max(args.min_vram_gb, round((free / 2**30) - args.vram_reserve_gb, 2))
+        args.max_vram_gb = float(args.max_vram_gb)
+        if free < args.min_vram_gb * 2**30:
+            raise SystemExit(f"only {free / 2**30:.1f} GB VRAM free, need {args.min_vram_gb} GB: "
+                             "is the vocal render paused?")
         torch.cuda.set_per_process_memory_fraction(min(args.max_vram_gb * 2**30 / total, 1.0))
+        print(f"VRAM: {free / 2**30:.2f} of {total / 2**30:.2f} GB free at start, cap {args.max_vram_gb:.2f} GB "
+              f"(reserve {args.vram_reserve_gb} GB)", flush=True)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
