@@ -176,3 +176,37 @@ used only as a backdrop, e.g. love songs from the Goblin or Hotel Del Luna sound
 "feels like hell" as a metaphor. Lyrics come from melon.com (`scripts/lyrics_scan.py`, keyword
 hits reviewed by hand). Dropped so far: 안예은 - 창귀, 창모 - METEOR, and one cover from a
 channel named "PIANO마녀".
+
+## Ready-made voice + note datasets (research 2026-11-21; built 2026-11-22 into /data/voice_data: VocalSet 5.1 h, CSD 2.4 h, HumTrans 3.2 h, ACE-KiSing 2.0 h, ChoralSynth 1.5 h)
+
+Checked against the NC policy above (official source, no extra terms beyond CC, no TDM
+reservation, no ND). These were checked by subagents on the official pages. ai.txt and
+tdmrep.json were not checked yet; check them before any download for training.
+
+CSD includes performances of songs whose compositions are still protected (e.g. Over the Rainbow, White Christmas, 마법의 성); the dataset licence does not say whether those were cleared. ACE-KiSing songs are Chinese pop. Both are used under the NC/TDM decision above. Tool: pyarrow 17.0.0 (Apache-2.0) in /data/ext/pyarrow_lib.
+
+Pass, sampled (2 files each, C:\Users\Christopher\Downloads\pianocover_voice_sources):
+- HumTrans (huggingface.co/datasets/dadinghh2/HumTrans, the GitHub repo points there): CC BY-NC 4.0,
+  not gated. 56 h of humming with MIDI. The song titles are not given, so the content filter
+  cannot be applied.
+- Children's Song Dataset v1.1 (zenodo.org/records/4916302): CC BY-NC-SA 4.0. Its extra clause
+  "any act that defames the original singer is strictly prohibited" is for the owner to judge.
+  50 English and 50 Korean songs, 1 singer, MIDI + CSV.
+- VocalSet (zenodo 1193957) + Annotated-VocalSet (zenodo 7061507): both CC BY 4.0. 10.1 h, mostly
+  exercises. The note labels have mismatches: C#5 is labelled 523.25 Hz, which is C5.
+- ACE-KiSing (huggingface.co/datasets/espnet/ace-kising-segments): CC BY-NC 4.0, not gated.
+  32.5 h of synthetic singing (ACE Studio), Chinese + English. The songs look like Chinese pop
+  covers, so the rights in the melodies are unclear. The original KiSing terms are unverified.
+- ChoralSynth (zenodo.org/records/10161065): Zenodo says CC BY-SA 4.0, but the GitHub README says
+  CC BY-NC-SA 4.0. Either passes the policy. 20 pieces, about 3.8 h, CPDL scores.
+
+Fail: GTSinger and M4Singer (indemnity / employer-authorisation agreement in
+dataset_license.md), Opencpop (ND), ACE-Opencpop (derived from ND Opencpop), OpenSinger and
+SingStyle111 (application), TONAS and cante100 ("all rights reserved"), Erkomaishvili
+("Other (Non-Commercial)", audio copyrighted), jaCappella (custom terms), DALI, MIR-ST500 and
+MulTTiPop (YouTube audio, evaluation only), MedleyDB and MUSDB (extra terms), Kiritan (no
+commercial use of outputs), Ofuton P and JSUT-song / JVS-MuSiC (permission or TLO needed).
+Open: PJS (CC BY-SA 4.0, commercial use OK; Google Drive quota exceeded, retry later),
+NIT SONG070 (only the HTS voice is CC BY 3.0; the licence of the recordings is not confirmed),
+SPDMX (CC BY 4.0, PDMX soundfont renders without lyric singing; uses MuseScore PD labels,
+which is weaker than our pre-1955 rule; download host not found).

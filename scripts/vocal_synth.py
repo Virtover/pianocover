@@ -294,7 +294,150 @@ def rms(x):
     return float(np.sqrt((v ** 2).mean())) if len(v) else 1e-6
 
 
-def work(row, midi_bytes, singer, sf2, seed, out, listen):
+def crop(pm, max_sec, seed=0, slack=15.0):
+    """Keep a random window of about max_sec of a long score (training uses 16 s chunks, so more
+    different pieces beat full lengths; owner 2026-11-21: random, not always the beginning).
+    The window starts at a randomly chosen vocal phrase start (no voice in the 0.15 s before it;
+    the piece start counts too) and ends at the latest vocal note end in [0.6, 1] x max_sec
+    after which no voice sounds for 0.15 s. Everything is shifted so the window starts at 0;
+    controller and pitch-bend states from before the window are carried to time 0.
+    The choice uses its own RNG (from seed), so the render's random stream is unchanged.
+    Returns "start-end" in seconds of the original, or None if the score was not cut."""
+    import pretty_midi
+
+    end_t = pm.get_end_time()
+    if not max_sec or end_t <= max_sec + slack:
+        return None
+    vn = sorted((n.start, n.end) for i in pm.instruments if is_vocal(i) for n in i.notes)
+    ends = np.array([e for _, e in vn]) if vn else np.zeros(0)
+    starts0 = np.array([s for s, _ in vn]) if vn else np.zeros(0)
+    cands = [0.0] + [s for s in starts0 if s <= end_t - max_sec and s > 0
+                     and not ((starts0 < s - 1e-3) & (ends > s - 0.15)).any()]
+    # a third each: the beginning, the last ~max_sec (climax and ending, which a uniform pick
+    # would almost never reach), a random middle window
+    cands = sorted(set(cands))
+    r = random.Random(seed ^ 0x5EED)
+    u = r.random()
+    t0 = cands[0] if u < 1 / 3 else cands[-1] if u < 2 / 3 else r.choice(cands)
+    for inst in pm.instruments:
+        inst.notes = [n for n in inst.notes if n.end > t0 + 0.05 and n.start >= t0 - 1e-3]
+        for n in inst.notes:
+            n.start, n.end = max(0.0, n.start - t0), n.end - t0
+        last = {}
+        for c in inst.control_changes:
+            if c.time <= t0:
+                last[c.number] = c
+        inst.control_changes = [pretty_midi.ControlChange(c.number, c.value, 0.0) for c in last.values()] + \
+            [pretty_midi.ControlChange(c.number, c.value, c.time - t0) for c in inst.control_changes if c.time > t0]
+        pb = [b for b in inst.pitch_bends if b.time <= t0]
+        inst.pitch_bends = ([pretty_midi.PitchBend(pb[-1].pitch, 0.0)] if pb else []) + \
+            [pretty_midi.PitchBend(b.pitch, b.time - t0) for b in inst.pitch_bends if b.time > t0]
+    meta_lists = ("time_signature_changes", "key_signature_changes", "lyrics", "text_events")
+    for name in meta_lists:  # meta events count for get_end_time / the rendered length too
+        evs = getattr(pm, name, None)
+        if evs is None:
+            continue
+        before = [e for e in evs if e.time <= t0]
+        keep = ([before[-1]] if before and name.endswith("changes") else []) + [e for e in evs if e.time > t0]
+        for e in keep:
+            e.time = max(0.0, e.time - t0)
+        setattr(pm, name, keep)
+    # times are stored in seconds; the old tempo map would put tempo events (and so the end
+    # of the written MIDI file, i.e. silence in the render) far past the window
+    pm._tick_scales = [(0, 60.0 / (120.0 * pm.resolution))]
+    pm._update_tick_to_time(1)
+    if end_t - t0 <= max_sec + slack:  # last window: keep the real ending
+        return f"{t0:.2f}-end"
+    vn = [(s - t0, e - t0) for s, e in vn if s >= t0 - 1e-3]
+    starts = np.array([s for s, _ in vn])
+    cut = max_sec
+    for s, e in sorted(vn, key=lambda x: -x[1]):
+        if e > max_sec:
+            continue
+        if e < 0.6 * max_sec:
+            break
+        sounding = any(a < e + 0.15 and b > e + 1e-3 for a, b in vn)
+        if not sounding and not ((starts > e) & (starts < e + 0.15)).any():
+            cut = e
+            break
+    for inst in pm.instruments:
+        inst.notes = [n for n in inst.notes if n.start < cut - 0.05]
+        for n in inst.notes:
+            n.end = min(n.end, cut)
+        inst.control_changes = [c for c in inst.control_changes if c.time < cut]
+        inst.pitch_bends = [b for b in inst.pitch_bends if b.time < cut]
+    for name in meta_lists:
+        if getattr(pm, name, None) is not None:
+            setattr(pm, name, [e for e in getattr(pm, name) if e.time < cut])
+    return f"{t0:.2f}-{t0 + cut:.2f}"
+
+
+def finish_audio(mix, rng, out, fam, rid):
+    """Shared post-processing: optional MP3 round trip, EQ/compression chain, random level, 16-bit WAV."""
+    from scipy.io import wavfile
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        wavfile.write(td / "mix.wav", FS, (mix / max(np.abs(mix).max(), 1e-6) * 0.9).astype(np.float32))
+        src = td / "mix.wav"
+        mp3 = rng.random() < 0.3
+        if mp3:
+            kbps = rng.choice([64, 96, 128, 192])
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src), "-b:a", f"{kbps}k",
+                            str(td / "mix.mp3")], check=True)
+            src = td / "mix.mp3"
+        subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src), "-af", post_chain(rng),
+                        "-ac", "1", "-ar", str(FS), "-c:a", "pcm_f32le", str(td / "m.wav")], check=True)
+        _, x = wavfile.read(td / "m.wav")
+    x = x.astype(np.float32)
+    x = x / max(float(np.abs(x).max()), 1e-6) * 10 ** (rng.uniform(-12, -1) / 20)
+    wav = Path(out) / fam / f"{rid}.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    wavfile.write(wav, FS, (x * 32767).astype(np.int16))
+    return x, wav, mp3
+
+
+def target_events(pm, extra=()):
+    """Score notes of all pitched tracks (+ extra [s, e, p]), folded into 21-108, sanitized."""
+    from pianocover import events
+
+    ev = [[n.start, n.end, n.pitch, max(1, n.velocity)] for i in pm.instruments if not i.is_drum for n in i.notes]
+    ev += [[s, e, p, 80] for s, e, p in extra]
+    ev = np.array(sorted(ev), dtype=np.float64).reshape(-1, 4)
+    while (ev[:, 2] < 21).any() or (ev[:, 2] > 108).any():
+        ev[ev[:, 2] < 21, 2] += 12
+        ev[ev[:, 2] > 108, 2] -= 12
+    return events.sanitize(ev)
+
+
+def work_voiceless(row, midi_bytes, sf2, seed, out, max_sec):
+    """Same score without singing synthesis: the vocal tracks are played by their MIDI programs
+    (choir aahs / oohs, strings, ...) as in score_synth's choir family. CPU only."""
+    import pretty_midi
+
+    rng = random.Random(seed)
+    rid = f"{row['_id']}_{seed % 1000}"
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    if not any(i.notes for i in pm.instruments if not i.is_drum):
+        return None
+    cut = crop(pm, max_sec, seed)
+    buf = io.BytesIO()
+    pm.write(buf)
+    apm, cfg = audio_midi(buf.getvalue(), "choir", rng)
+    with tempfile.TemporaryDirectory() as td:
+        acc, room = render_acc(apm, sf2, rng, Path(td))
+    if acc is None:
+        return None
+    x, wav, mp3 = finish_audio(acc, rng, out, "voiceless", rid)
+    ev = target_events(pm)
+    dur = len(x) / FS
+    ev = ev[ev[:, 0] < dur]
+    meta = {"soundfont": Path(sf2).name, "room": room, "mp3": int(mp3),
+            "programs": " ".join(map(str, cfg["programs"])), "cropped_at": cut}
+    return {"fam": "voiceless", "id": rid, "notes": ev, "duration": dur, "nSamples": len(x), "meta": meta}
+
+
+def work(row, midi_bytes, singer, sf2, seed, out, listen, max_sec=None):
     import pretty_midi
     from scipy.io import wavfile
     from scipy.signal import fftconvolve
@@ -304,6 +447,7 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     rng = random.Random(seed)
     rid = f"{row['_id']}_{seed % 1000}"
     pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    cut = crop(pm, max_sec, seed)
     vox = [i for i in pm.instruments if is_vocal(i) and i.notes]
     if not vox:
         return None
@@ -428,7 +572,7 @@ def work(row, midi_bytes, singer, sf2, seed, out, listen):
     ev = ev[ev[:, 0] < dur]
     meta = {"soundfont": Path(sf2).name, "room": room, "mp3": int(mp3), "programs": " ".join(map(str, cfg["programs"])),
             "shift": shift, "voices": " ".join(f"{v['prompt']}:{v['n']}" for v in voices), "vocal_ir_rt60": round(rt, 2),
-            "vocal_wet": round(wet, 2), "lead_db": round(lead, 1), "undoubled": undoubled}
+            "vocal_wet": round(wet, 2), "lead_db": round(lead, 1), "undoubled": undoubled, "cropped_at": cut}
     if listen:
         write_listen(Path(listen), rid, row, wav, ev, sf2)
     return {"fam": "vocal", "id": rid, "notes": ev, "duration": dur, "nSamples": len(x), "meta": meta}
@@ -478,28 +622,29 @@ def candidates(path):
     return [r[1] for r in keep], drop
 
 
-def finalize(out, rows_meta):
-    """meta.csv and the transkun pickles from all per-piece records in <out>/vocal/items."""
+def finalize(out, rows_meta, fam="vocal"):
+    """meta.csv and the transkun pickles from all per-piece records in <out>/<fam>/items."""
     recs = []
-    for f in sorted((out / "vocal" / "items").glob("*.pkl")):
+    for f in sorted((out / fam / "items").glob("*.pkl")):
         recs.append(pickle.load(open(f, "rb")))
     if not recs:
         return 0
-    with open(out / "vocal" / "meta.csv.tmp", "w", newline="", encoding="utf8") as f:
+    keys = list(dict.fromkeys(k for r in recs for k in r["meta"]))  # union: later renders add fields
+    with open(out / fam / "meta.csv.tmp", "w", newline="", encoding="utf8") as f:
         w = csv.writer(f)
         w.writerow(["id", "split", "pdmx_row", "title", "composer", "license", "pdmx_mid", "duration", "nSamples",
-                    *recs[0]["meta"].keys()])
+                    *keys])
         for r in recs:
             w.writerow([r["id"], r["split"], r["pdmx_row"], r["row"]["title"], r["row"]["composer_name"],
                         r["row"]["license"], r["row"]["mid"], round(r["duration"], 2), r["nSamples"],
-                        *r["meta"].values()])
-    os.replace(out / "vocal" / "meta.csv.tmp", out / "vocal" / "meta.csv")
+                        *(r["meta"].get(k, "") for k in keys)])
+    os.replace(out / fam / "meta.csv.tmp", out / fam / "meta.csv")
     for split in ("train", "val"):
-        items = [{"audio_filename": f"vocal/{r['id']}.wav", "duration": r["duration"], "fs": FS,
-                  "nSamples": r["nSamples"], "nChannel": 1, "notes": to_transkun(r["notes"]), "source": "vocal",
+        items = [{"audio_filename": f"{fam}/{r['id']}.wav", "duration": r["duration"], "fs": FS,
+                  "nSamples": r["nSamples"], "nChannel": 1, "notes": to_transkun(r["notes"]), "source": fam,
                   "split": split} for r in recs if r["split"] == split]
-        pickle.dump(items, open(out / "vocal" / f"{split}.pickle.tmp", "wb"))
-        os.replace(out / "vocal" / f"{split}.pickle.tmp", out / "vocal" / f"{split}.pickle")
+        pickle.dump(items, open(out / fam / f"{split}.pickle.tmp", "wb"))
+        os.replace(out / fam / f"{split}.pickle.tmp", out / fam / f"{split}.pickle")
     return len(recs)
 
 
@@ -522,6 +667,11 @@ def main():
     ap.add_argument("--workers", type=int, default=1,
                     help="processes sharing the GPU (each gets max-vram-gb / workers); pieces are split by position")
     ap.add_argument("--shard", type=int, default=-1, help=argparse.SUPPRESS)
+    ap.add_argument("--max-sec", type=float, default=180.0,
+                    help="cut longer scores at a vocal phrase end near this (0 = no cut; owner 2026-11-21)")
+    ap.add_argument("--skip-file", help="PDMX rows not to sing (default <out>/skip_ids.txt if it exists)")
+    ap.add_argument("--voiceless", action="store_true",
+                    help="CPU only: render the skip-file rows without singing synthesis into <out>/voiceless")
     args = ap.parse_args()
 
     # <out>/PAUSE: wait here (before CUDA is touched, so no GPU memory is held); a running
@@ -529,6 +679,9 @@ def main():
     pause = Path(args.out) / "PAUSE"
     while pause.exists():
         time.sleep(30)
+    # read after the pause, so a skip list written while paused is used
+    skip_file = Path(args.skip_file) if args.skip_file else Path(args.out) / "skip_ids.txt"
+    skip = {int(x) for x in skip_file.read_text().split()} if skip_file.exists() else set()
 
     if args.workers > 1 and args.shard < 0:
         # parent: one child per shard, then the final meta.csv / pickles from all records
@@ -541,17 +694,20 @@ def main():
         codes = [p.wait() for p in procs]
         if any(codes):
             sys.exit(3 if 3 in codes else 1)
-        print("finalized", finalize(Path(args.out), None), "pieces", flush=True)
+        print("finalized", finalize(Path(args.out), None, "voiceless" if args.voiceless else "vocal"), "pieces", flush=True)
         return
 
     import resource
 
     import pandas as pd
-    import torch
 
-    total = torch.cuda.get_device_properties(0).total_memory
-    vram = args.max_vram_gb / max(1, args.workers)
-    torch.cuda.set_per_process_memory_fraction(min(1.0, vram * 2**30 / total))
+    fam = "voiceless" if args.voiceless else "vocal"
+    if not args.voiceless:
+        import torch
+
+        total = torch.cuda.get_device_properties(0).total_memory
+        vram = args.max_vram_gb / max(1, args.workers)
+        torch.cuda.set_per_process_memory_fraction(min(1.0, vram * 2**30 / total))
     out = Path(args.out)
     if args.candidates:
         ids, drop = candidates(args.candidates)
@@ -562,12 +718,14 @@ def main():
     # resumed run renders exactly what an uninterrupted one would
     rng = random.Random(args.seed)
     plan = [(k, i, rng.randrange(2**31), rng.choice(args.sf2)) for k, i in enumerate(ids)]
-    items, tries = out / "vocal" / "items", out / "vocal" / "tries"
+    items, tries = out / fam / "items", out / fam / "tries"
     items.mkdir(parents=True, exist_ok=True)
     tries.mkdir(parents=True, exist_ok=True)
     todo = []
     for k, i, seed, sf2 in plan:
         if (items / f"{i}.pkl").exists() or (items / f"{i}.none").exists():
+            continue
+        if (i in skip) != args.voiceless:  # sung: all but the skip list; voiceless: only the skip list
             continue
         t = tries / f"{i}.n"
         n = int(t.read_text()) if t.exists() else 0
@@ -588,8 +746,8 @@ def main():
         del df
         global UNDOUBLE_P
         UNDOUBLE_P = args.undouble_p
-        singer = Singer(args.soulx, attn=args.attn)
-        if args.prompts:
+        singer = None if args.voiceless else Singer(args.soulx, attn=args.attn)
+        if args.prompts and singer is not None:
             PROMPTS.clear()
             PROMPTS.update(json.load(open(Path(args.prompts) / "prompts.json")))
             singer.prompt_dir = args.prompts
@@ -603,7 +761,12 @@ def main():
                 sys.exit(3)
             t0 = time.perf_counter()
             TIMES.clear()
-            r = work(rows[i], mids[i], singer, sf2, seed, out, args.listen) if i in mids else None
+            if i not in mids:
+                r = None
+            elif args.voiceless:
+                r = work_voiceless(rows[i], mids[i], sf2, seed, out, args.max_sec)
+            else:
+                r = work(rows[i], mids[i], singer, sf2, seed, out, args.listen, args.max_sec)
             if r is None:
                 (items / f"{i}.none").write_text("no vocal line / no midi")
                 continue
@@ -616,10 +779,10 @@ def main():
             print(f"time {time.perf_counter() - t0:.1f}s audio {r['duration']:.1f}s",
                   " ".join(f"{k}={v:.1f}s" for k, v in TIMES.items()), flush=True)
             if (n_done + 1) % 25 == 0 and args.shard <= 0:
-                finalize(out, rows)
+                finalize(out, rows, fam)
     print("peak RAM", round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2), "GB", flush=True)
     if args.shard < 0:
-        print("finalized", finalize(out, None), "pieces", flush=True)
+        print("finalized", finalize(out, None, fam), "pieces", flush=True)
 
 
 if __name__ == "__main__":
