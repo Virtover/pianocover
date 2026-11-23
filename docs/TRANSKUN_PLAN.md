@@ -198,6 +198,10 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    **WAVs rebuilt 2026-11-23 for a subset** (`piano_replay.py --train-hours 40`, seed 0): 597
    train covers (40.1 h) + all 76 val (4.9 h). The pickles list only these; the full list of
    2026-11-20 is kept as meta_full_2026-11-20.csv.
+   **Backup done 2026-11-23** (owner's yes): F:\pianocover-backup\pc-data-transkun.tar, 66.7 GB,
+   synth_tk2 + synth_vocal + voice_data + tier1_data (all sources, gate still pending) +
+   piano_replay/piano; its member list matches the source list (pc-data-transkun.files.txt,
+   12 795 files). Repo mirrored the same day.
    **Backup before training (ask the owner first, do not start without an explicit yes):** copy
    the repo and **only what the Transkun training needs**, not the whole volume, to the USB
    drive, F:\pianocover-backup:
