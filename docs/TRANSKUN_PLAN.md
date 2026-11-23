@@ -178,7 +178,23 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    Dagstuhl, CSD, ESMUC, Cantoría, MusicNet; all downloaded, md5 checked, about 21 GB).
    URMP (Dryad) not added yet. Next: converters,
    then the listening gate (3-5 control files per source).
+   **Converted 2026-11-23** (`scripts/tier1_convert.py` → /data/tier1_data/<src>, splits
+   train/val/test by piece, audio as recorded with peak at -1 dBFS, velocity 80 since no set has
+   it): vocadito, guitarset (test/val = one held-out progression per style each), dagstuhl
+   (room mic STM, 22.05 kHz source; Tebe Poem = test), esmuc (room mic ORTF or the close mics
+   summed; unison singers merged; Die Himmel = test), choral (Cuesta CSD: full 16-singer mix +
+   one quartet variant; Niño Dios = test), cantoria (SATB mix without the organ, whose notes
+   are unknown; notes estimated from each singer's pYIN F0, the weakest labels), musicnet
+   (original DTW labels; official test pieces = test; MusicNetEM not used, see
+   MODEL_LICENSES.md). Gate files (4 per source, 45 s, left recording / right labels on piano)
+   in Downloads\pianocover_tier1_gate, **awaiting the owner's listening**.
+   URMP: Dryad now refuses scripted downloads (API 401, web 403); the owner can fetch
+   Dataset.tar.gz (12.1 GB, md5 8452b1a734fad6f3c10bd19940bc09b4) in a browser if wanted.
+   Bach10: licence still unverified, not converted.
 4. **Tier 2:** piano replay pickle from /data/ds_all (audio + `cover_events`).
+   **WAVs rebuilt 2026-11-23 for a subset** (`piano_replay.py --train-hours 40`, seed 0): 597
+   train covers (40.1 h) + all 76 val (4.9 h). The pickles list only these; the full list of
+   2026-11-20 is kept as meta_full_2026-11-20.csv.
    **Backup before training (ask the owner first, do not start without an explicit yes):** copy
    the repo and **only what the Transkun training needs**, not the whole volume, to the USB
    drive, F:\pianocover-backup:
@@ -283,8 +299,6 @@ Downloads/pianocover_perkusja_test, variants 2-5b, listened to by the owner):
 
 ## Open items
 
-- "Fortepian przeciw zapominaniu" (owner's request, 2026-11-19): to add to the dataset; not found
-  on the web under that name, link / source needed from the owner.
 - Verify licences: Bach10, VSCO-2/VSCL, MuseScore_General (MusicNet, GuitarSet, URMP done
   2026-11-19);
   confirm the Transkun 2.0 weights licence with the author.

@@ -85,7 +85,16 @@ def main():
     ap.add_argument("--out", default="/data/piano_replay")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--limit", type=int, default=0, help="first N items per split (for a test run)")
+    ap.add_argument("--train-hours", type=float, default=0.0,
+                    help="random subset of train covers of about this many hours (0 = all); val stays complete. "
+                         "Durations come from the existing meta.csv, so the choice needs no decoding")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    known = {}
+    meta_old = Path(args.out) / "piano" / "meta.csv"
+    if meta_old.exists():
+        with open(meta_old, encoding="utf8") as f:
+            known = {r["id"]: float(r["duration"]) for r in csv.DictReader(f)}
     out = Path(args.out)
     (out / "piano").mkdir(parents=True, exist_ok=True)
     rows = []
@@ -101,6 +110,17 @@ def main():
             its.append((root, it["piano_id"], str(out)))
         if args.limit:
             its = its[: args.limit]
+        if split == "train" and args.train_hours > 0:
+            import random
+
+            random.Random(args.seed).shuffle(its)
+            keep, h = [], 0.0
+            for j in its:
+                if h >= args.train_hours:
+                    break
+                keep.append(j)
+                h += known.get(j[1], 240.0) / 3600  # unknown length: about a typical cover
+            its = keep
         with Pool(args.workers) as pool:
             res = [r for r in pool.imap_unordered(work, its, chunksize=4) if r]
         res.sort(key=lambda r: r["id"])
