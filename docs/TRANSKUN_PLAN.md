@@ -161,6 +161,16 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    F1 0.95 or after 120 training minutes. The run is resumable. Its output is a step-0
    baseline, per-family train F1, and val F1 as a hint. A CPU smoke test passed, including
    resume. Not run on the GPU yet: the vocal render is paused first (PAUSE file).
+   **Owner 2026-11-23: run it right after the dataset is done.** Container `pc-capacity`
+   (pianocover:dev, 6 CPUs, 8 GB RAM, restart unless-stopped) waits for "ALL DONE" in
+   /data/synth_vocal.log, then runs the test (log /data/runs/tk_capacity.log, marker
+   /data/runs/tk_capacity/DONE so it does not run twice).
+   **Result 2026-11-23 (measured): PASS.** Train onset F1 0.771 at step 0 → 0.953 at step 750
+   (35.5 training minutes, 2.58 h subset, batch 3 × accum 3, peak VRAM 4.44 GB of a 5.96 GB
+   cap). Per family at the end: guitar 0.998, piano 0.984, chamber 0.969, organ 0.946,
+   choir 0.938, orchestra 0.923, band 0.916. Val hint 0.715 → 0.910. The second variant
+   (voice mixes) is not needed, since the first one is not weak.
+   Vocal render finished 2026-11-23: 637 pieces, train 23.84 h + val 1.43 h.
 3. **Tier 1 download + licence check:** MusicNet(+EM), Dagstuhl, GuitarSet, URMP, Bach10.
    Licence rows go in MODEL_LICENSES.md; NC ones in the NC log. Convert to the same pickle.
    **Started 2026-11-19:** licences checked; `scripts/tier1_download.py` fetches the Zenodo
