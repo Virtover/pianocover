@@ -186,7 +186,10 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    one quartet variant; Niño Dios = test), cantoria (SATB mix without the organ, whose notes
    are unknown; notes estimated from each singer's pYIN F0, the weakest labels), musicnet
    (original DTW labels; official test pieces = test; MusicNetEM not used, see
-   MODEL_LICENSES.md). Gate files (4 per source, 45 s, left recording / right labels on piano)
+   MODEL_LICENSES.md). Hours (train / val / test): musicnet 29.8 / 1.4 / 2.9 (all recordings
+   of an official test composition go to test), guitarset 2.0 / 0.5 / 0.5, dagstuhl
+   0.5 / 0.04 / 0.1, esmuc 0.4 / 0.02 / 0.06, cantoria 0.5 / 0.04 / 0.03, choral 0.18 / 0 / 0.06,
+   vocadito 0.17 / 0.02 / 0.03; 11.8 GB. Gate files (4 per source, 5 for musicnet, 45 s, left recording / right labels on piano)
    in Downloads\pianocover_tier1_gate, **awaiting the owner's listening**.
    URMP: Dryad now refuses scripted downloads (API 401, web 403); the owner can fetch
    Dataset.tar.gz (12.1 GB, md5 8452b1a734fad6f3c10bd19940bc09b4) in a browser if wanted.
