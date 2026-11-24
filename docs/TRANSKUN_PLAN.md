@@ -191,6 +191,11 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    0.5 / 0.04 / 0.1, esmuc 0.4 / 0.02 / 0.06, cantoria 0.5 / 0.04 / 0.03, choral 0.18 / 0 / 0.06,
    vocadito 0.17 / 0.02 / 0.03; 11.8 GB. Gate files (4 per source, 5 for musicnet, 45 s, left recording / right labels on piano)
    in Downloads\pianocover_tier1_gate, **awaiting the owner's listening**.
+   **Cantoría: not used in training (owner 2026-11-24).** The first build's labels were short
+   random fragments: the pYIN voicing probability (about 0.25 in sung notes) was thresholded at
+   0.5, keeping 7% of the frames. Fixed on D: the same day (voiced = pYIN f0 > 0; same-pitch notes
+   joined across gaps < 0.15 s; fragments < 0.15 s dropped; median note 0.12 s → 0.2-0.3 s), but
+   the USB backup on F: still holds the old labels, so the training set list leaves cantoria out.
    URMP: Dryad now refuses scripted downloads (API 401, web 403); the owner can fetch
    Dataset.tar.gz (12.1 GB, md5 8452b1a734fad6f3c10bd19940bc09b4) in a browser if wanted.
    Bach10: licence still unverified, not converted.
@@ -247,6 +252,21 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    pianists" in the authors' listening test) and a 1-hour listening test on the 5a samples and a
    few synth_tk2 piano renders. README warning: very low temperature gives extreme expression or
    repetitive patterns.
+   **Benchmark 2026-11-23 (measured, 3060 Ti; `scripts/pt_bench.py`, `pianocover/pianist.py`):**
+   code in third_party/PianistTransformer (git clone, ignored by git), weights + deps in
+   /data/ext. The authors' sampler (HF `generate` + a per-row Python logits processor) is
+   CPU-bound at ~18 ms per token whatever the batch: 534 notes in 80 s. `pianist.py` decodes on
+   a static KV cache as CUDA graphs (length buckets), samples on the GPU and batches pieces by
+   window round: the same 534 notes in 7 s; all 23 test pieces (62 k notes, 90 min of music)
+   in 95 s; 1.0 ms/token at batch 1, 2.5 ms at batch 32. CPU, 2 threads (eager): 658 notes
+   (49 s of music) in 153 s, i.e. 0.3x real time. Logits match HF to bf16 noise
+   (HF loads the model with SDPA, which ignores the config's attention softcap; so does ours).
+   The authors' batching passes a token-level padding mask to the cross-attention over the 8x
+   compressed encoder states (fixed here), and feeds the window overlap shifted by one token
+   (kept for parity, `--fix-prefix` to change). Authors' objective metrics vs. 166 human
+   performances (JS divergence, lower is better; velocity / duration / IOI / pedal): plain
+   score 0.75 / 0.68 / 0.77 / 0.44, renders shipped in their repo 0.17 / 0.19 / 0.18 / 0.11,
+   ours 0.14 / 0.11 / 0.17 / 0.11. Samples: Downloads\pianocover_pianist_samples.
 
 ## Reduction ("reduced" mode)
 

@@ -150,6 +150,20 @@ def split_groups(groups, n_test, n_val, seed, fixed_test=()):
     return {k: "test" if k in test else "val" if k in val else "train" for k in g}
 
 
+def clean_sung(notes, gap=0.15, short=0.15):
+    """f0 notes of one voice: join same-pitch notes across gaps < `gap` s (consonants, breaths),
+    drop fragments shorter than `short` s (slides between notes), then join again."""
+    def join(ns, g):
+        out = []
+        for n in sorted(ns):
+            if out and n[2] == out[-1][2] and n[0] - out[-1][1] < g:
+                out[-1][1] = max(out[-1][1], n[1])
+            else:
+                out.append(list(n))
+        return out
+    return join([n for n in join(notes, gap) if n[1] - n[0] >= short], 2 * gap)
+
+
 def write_item(out, src, iid, x, notes, split, meta):
     """x: float mono FS; notes [s, e, p] or [s, e, p, v]. Returns hours (0 if it existed)."""
     from pianocover import events
@@ -371,7 +385,10 @@ def cantoria(raw, out, seed):
             rows = [r.split(",") for r in z.read(f"F0_pyin/Cantoria_{song}_{v}.csv").decode().strip().splitlines()]
             rows = [r for r in rows if r and re.match(r"-?\d", r[0])]
             arr = np.array([[float(c) for c in r[:3]] for r in rows])
-            notes += f0_notes(arr[:, 0], arr[:, 1], arr[:, 2] if arr.shape[1] > 2 else None)
+            # voiced = pYIN's own decision (f0 > 0, unvoiced frames are negative). The third column is
+            # the voicing probability, about 0.25 in sung notes: thresholding it at 0.5 (first build,
+            # 2026-11-23) kept 7% of the frames and gave short random fragments.
+            notes += clean_sung(f0_notes(arr[:, 0], arr[:, 1], None))
         split = "test" if song in ("VBP", "YSM") else "val" if song == "THM" else "train"
         h += write_item(out, "cantoria", f"Cantoria_{song}", read_audio(z.read(f"Audio/Cantoria_{song}_Mix.wav")),
                         notes, split, {"song": song, "labels": "pYIN f0 -> notes (estimated)"})
