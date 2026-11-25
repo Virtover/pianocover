@@ -256,6 +256,15 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    vocal stem (229 junk notes), so it would need a gate. Cost: +20-70 s per song, 0.6 GiB VRAM
    (Demucs, output kept in RAM) / 1.5 GiB (CREPE). Open: Demucs weights' licence (none on GitHub
    or HF), so the owner prefers trying a vocal-weighted Transkun fine-tune first.
+   **Vocal-weighted continued fine-tune, 2026-11-25: does not help** (/data/runs/tk_vocal1, 3060 Ti;
+   `--init` best_transkun.pt, groups tier1 0.15 / piano 0.20 / synth without vocals 0.35 / vocal
+   0.30 (synth_vocal/vocal, ace_kising, csd, humtrans, vocalset; was ~0.18), 3000 steps, batch
+   2 × accum 4, lr 2e-5; 2.95 s/step, peak 3.06 GB, 2.8 h with 5 validations). Vocal group val F1:
+   0.622 (step 0) → 0.613 → 0.600 → 0.615 → 0.606 (step 3000); real voice vocadito 0.25 → 0.14-0.19,
+   csd 0.74 → 0.68-0.73; piano 0.967 → 0.973-0.977. On the 6 sung test songs, share of the CREPE
+   melody notes covered (`scripts/vocal_coverage.py`): 0.729 → 0.707 (step 2250 weights), lower on
+   every song (plain 2.0: 0.054). More weight on the same 36 h of vocal data overfits its labels; a
+   gain needs other data (more real, well-labelled singing) or the separate melody path above.
 7. **Reduction module and wrapper** (can be built in parallel with 1-5, it only needs MIDI).
    Reduction in progress (see its status below); wrapper not started.
 8. **Pianist Transformer, only after Transkun is trained and passed phase 6.**
