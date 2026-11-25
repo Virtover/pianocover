@@ -228,10 +228,34 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
 5. **Training:** init 2.0.pt, lower max_lr than the default 2e-4 (start at 5e-5), mixed
    sampling as above, validation per source every N steps. Memory: ≤ 5 GiB VRAM; measure batch
    size × segment length × checkpointing first (`bench`-style, like `scripts/bench_matrix.sh`).
+   **Done 2026-11-25 on the RTX 5070** (`scripts/tk_train.py`, default mix tier1 0.20 / piano 0.25 /
+   synth 0.55, 22 500 steps, batch 4 × accum 2, 16 s chunks, lr 5e-5, `--augment` without IR or
+   noise folders; 1.41 s/step, peak 5.82 GB). Weights on F:\pianocover-backup\model_transkun_5070_2026-11-25
+   (best_transkun.pt = step 12 000, val 0.734; copy in /data/ext/tk_ft_20261125). Val onset F1 at
+   step 0 → best: piano replay 0.986 → 0.967 (0.977 at the end), synth orchestra 0.56 → 0.86,
+   band 0.59 → 0.80, choir 0.82 → 0.96, synth vocal 0.19 → 0.62, GuitarSet 0.76 → 0.90, MusicNet
+   (real) 0.33 → 0.45, vocadito (real voice) 0.01 → 0.19, choralsynth 0.003 → 0.06 (suspicious,
+   check its labels). Orchestra plateaued from step ~7500, vocal from ~9000, MusicNet stayed 0.40-0.46.
+   `--init` (2026-11-25) continues from other weights, e.g. this best_transkun.pt.
 6. **Evaluation:** note F1 (onset; onset+offset) per source on held-out **real** data:
    MusicNet test, Dagstuhl subset, URMP/Bach10 subset (each only if it passed the gate), plus a piano regression
    check against 2.0.pt on held-out piano covers. Optional reference: YourMT3+ on the same
    files (evaluation only; check its weights' licence). Then listening on the 7 request songs.
+   **7 request songs, 2026-11-25** (`scripts/tk_songs.py`, 3060 Ti, fp32; files in
+   data/test_songs/transkun_ft, gitignored): fine-tuned vs 2.0 notes per second, full mode:
+   Odysseus 3.06 / 1.59, Your Presence 7.41 / 2.60, SO BE IT 9.52 / 2.41, Open The Scroll
+   8.29 / 1.73, Wierny Bóg 9.49 / 3.08, Toccata 1.72 / 0.33, I Speak Jesus 6.01 / 1.32. 17-51 s per
+   song (~21x real time), peak 0.9-1.2 GiB allocated. The Toccata recording gets almost nothing
+   from either model (2.0: 3 notes in a loud 60 s excerpt, also with the stock CLI): the audio is
+   atypical for Transkun, not a fine-tuning regression. Odysseus: quiet passages (< -29 dBFS) get
+   16-28 notes per 30 s; input gain / dynaudnorm change nothing (the model is level-invariant).
+   **Vocal add-on test** (`scripts/vocal_test.py`, Demucs htdemucs vocal stem → CREPE → notes added
+   where Transkun has no same-pitch-class note): Transkun already covers 64-86% of the sung notes
+   (Odysseus 86, Your Presence 70, SO BE IT 77, Open The Scroll 69, Wierny Bóg 64, I Speak Jesus
+   72); 70-676 notes added per song; on the Toccata (no singing) Demucs leaks the instrument into the
+   vocal stem (229 junk notes), so it would need a gate. Cost: +20-70 s per song, 0.6 GiB VRAM
+   (Demucs, output kept in RAM) / 1.5 GiB (CREPE). Open: Demucs weights' licence (none on GitHub
+   or HF), so the owner prefers trying a vocal-weighted Transkun fine-tune first.
 7. **Reduction module and wrapper** (can be built in parallel with 1-5, it only needs MIDI).
    Reduction in progress (see its status below); wrapper not started.
 8. **Pianist Transformer, only after Transkun is trained and passed phase 6.**
@@ -267,6 +291,13 @@ Size target: about 60-100 h synthetic + all of tier 1 + tier 2 sampled *(estimat
    performances (JS divergence, lower is better; velocity / duration / IOI / pedal): plain
    score 0.75 / 0.68 / 0.77 / 0.44, renders shipped in their repo 0.17 / 0.19 / 0.18 / 0.11,
    ours 0.14 / 0.11 / 0.17 / 0.11. Samples: Downloads\pianocover_pianist_samples.
+   **All covers of the 7 songs, 2026-11-25** (`scripts/pt_all.py`): 63 MIDIs (Music2MIDI,
+   Transkun 2.0 / fine-tuned full + reduced, +vocal), 213 k notes, 10 h of music, in one
+   `render_ids` call with windows="two_pass": 211 s (1009 notes/s, ~170x real time), peak
+   2.9 GiB; one song alone (SO BE IT, 3327 notes) 9 s, 1.9 GiB. `_run_windows` now sorts windows
+   by length before chunking and `_run_chunk` stops at the chunk's longest window (~5% faster on
+   the authors' test set; greedy outputs agree with the old code on 92-100% of tokens, which is
+   within the bf16 noise of the old code itself: 76-85% between max_batch 32 and 8).
 
 ## Reduction ("reduced" mode)
 

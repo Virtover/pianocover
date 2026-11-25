@@ -77,6 +77,8 @@ def best_split(pitches, lim, prev):
     point closest to the previous one; None if no split works. pitches must be sorted."""
     best, best_d = None, None
     n = len(pitches)
+    if n == 0:  # nothing needs a finger (e.g. every note of the cluster ended within onset_tol)
+        return 0
     for k in range(n + 1):
         if _valid(pitches[:k], lim) and _valid(pitches[k:], lim):
             point = (pitches[k - 1] + pitches[k]) / 2 if 0 < k < n else (pitches[0] - 1 if k == 0 else pitches[-1] + 1)

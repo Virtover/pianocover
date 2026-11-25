@@ -297,10 +297,23 @@ class FastRenderer:
     def _run_windows(self, wins, prefixes, temperature, top_p, gen, use_graph, max_batch, progress):
         """wins: score-token lists (len <= W); prefixes: None or equal-length decoder contexts (window
         coordinates, without BOS) -> one sampled token list per window (len of the window)."""
-        out = []
-        for c in range(0, len(wins), max_batch):
-            out += self._run_chunk(wins[c: c + max_batch], prefixes and prefixes[c: c + max_batch],
-                                   temperature, top_p, gen, use_graph, progress)
+        # Chunks are formed after sorting by (prefix length, window length), so a chunk holds windows
+        # of similar length and _run_chunk can stop at its longest window instead of always W.
+        # Results come back in the caller's order. (Sampling draws from one generator, so a
+        # different chunking gives different samples from the same distribution; with greedy
+        # decoding the output is identical.)
+        plen = [len(p) for p in prefixes] if prefixes else [0] * len(wins)
+        order = sorted(range(len(wins)), key=lambda i: (plen[i], -len(wins[i])))
+        out = [None] * len(wins)
+        c = 0
+        while c < len(order):
+            idx = order[c: c + max_batch]
+            idx = [i for i in idx if plen[i] == plen[idx[0]]]  # one prefix length per chunk
+            res = self._run_chunk([wins[i] for i in idx], prefixes and [prefixes[i] for i in idx],
+                                  temperature, top_p, gen, use_graph, progress)
+            for i, r in zip(idx, res):
+                out[i] = r
+            c += len(idx)
         return out
 
     def _run_chunk(self, wins, prefixes, temperature, top_p, gen, use_graph, progress):
@@ -334,11 +347,12 @@ class FastRenderer:
         pos = torch.tensor(m, device=dev)
         feed = torch.tensor(m + 1, device=dev)
         step_fn = self._graph_step(B, st) if (use_graph and dev.type == "cuda") else None
-        for q in range(m, W):
+        L = max(len(w) for w in wins)  # tokens past a window's length are discarded anyway
+        for q in range(m, L):
             pos.fill_(q)
             tok = self._sample(logits, pos, ids, temperature, top_p, gen)
             gen_tok[:, q] = tok[:, 0]
-            if q == W - 1:
+            if q == L - 1:
                 break
             feed.fill_(q + 1)
             if step_fn is not None:
